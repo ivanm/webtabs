@@ -21,7 +21,10 @@ use crate::badge::Badge;
 use crate::config::{self, Config, Tab};
 use crate::{favicon, links, presets};
 use ::windows::Win32::Foundation::*;
-use ::windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient, UpdateWindow};
+use ::windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, ScreenToClient, UpdateWindow,
+};
 use ::windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IStream};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::Threading::CreateMutexW;
@@ -34,10 +37,10 @@ use ::windows::core::{HSTRING, Interface, PCWSTR, PWSTR, w};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::result::Result;
 use std::time::{Duration, Instant, SystemTime};
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::*;
-use std::result::Result;
 
 const CLASS: PCWSTR = w!("WebTabsWindow");
 const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -228,7 +231,11 @@ fn modifiers() -> usize {
 pub fn key_for(vk: u32, mods: usize) -> Option<Key> {
     let vk = VIRTUAL_KEY(vk as u16);
     let ch = |c: u8| vk.0 == u16::from(c);
-    let (ctrl, shift, alt) = (mods & MOD_CTRL != 0, mods & MOD_SHIFT != 0, mods & MOD_ALT != 0);
+    let (ctrl, shift, alt) = (
+        mods & MOD_CTRL != 0,
+        mods & MOD_SHIFT != 0,
+        mods & MOD_ALT != 0,
+    );
     if ctrl && !alt && (u16::from(b'1')..=u16::from(b'9')).contains(&vk.0) {
         return Some(Key::Tab((vk.0 - u16::from(b'0')) as u8));
     }
@@ -326,16 +333,27 @@ impl App {
         }
         .map_err(|e| e.message())?;
         // CW_USEDEFAULT sizes are in physical pixels; scale to the monitor.
+        // Fit the monitor's work area (small screens, big scale factors).
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as i32;
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+        }
+        let work = mi.rcWork;
+        let w = (1280 * dpi / 96).min(work.right - work.left);
+        let h = (860 * dpi / 96).min(work.bottom - work.top);
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 None,
-                0,
-                0,
-                1280 * dpi / 96,
-                860 * dpi / 96,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                work.left + (work.right - work.left - w) / 2,
+                work.top + (work.bottom - work.top - h) / 2,
+                w,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
         let tooltip = unsafe {
@@ -703,7 +721,10 @@ impl App {
             match result {
                 Ok(c) => app.attach(&tv, c),
                 Err(e) => {
-                    eprintln!("webtabs: cannot create a view for {}: {e}", tv.tab.borrow().url);
+                    eprintln!(
+                        "webtabs: cannot create a view for {}: {e}",
+                        tv.tab.borrow().url
+                    );
                     tv.state.set(Load::Ready); // don't retry in a loop
                 }
             }
@@ -846,18 +867,21 @@ impl App {
                 &mut token,
             )?;
             match wv.cast::<ICoreWebView2_24>() {
-                Err(e) => eprintln!("webtabs: no notification support in this WebView2: {}", e.message()),
+                Err(e) => eprintln!(
+                    "webtabs: no notification support in this WebView2: {}",
+                    e.message()
+                ),
                 Ok(wv24) => {
-                wv24.add_NotificationReceived(
-                    &NotificationReceivedEventHandler::create(Box::new(move |_, args| {
-                        let Some(args) = args else { return Ok(()) };
-                        args.SetHandled(true)?;
-                        let n = args.Notification()?;
-                        with_tab(id, |app, tv| app.notify(tv, &n));
-                        Ok(())
-                    })),
-                    &mut token,
-                )?;
+                    wv24.add_NotificationReceived(
+                        &NotificationReceivedEventHandler::create(Box::new(move |_, args| {
+                            let Some(args) = args else { return Ok(()) };
+                            args.SetHandled(true)?;
+                            let n = args.Notification()?;
+                            with_tab(id, |app, tv| app.notify(tv, &n));
+                            Ok(())
+                        })),
+                        &mut token,
+                    )?;
                 }
             }
         }
@@ -1046,6 +1070,13 @@ impl App {
         let Ok(wv15) = wv.cast::<ICoreWebView2_15>() else {
             return;
         };
+        let mut uri = PWSTR::null();
+        unsafe {
+            let _ = wv15.FaviconUri(&mut uri);
+        }
+        if take_pwstr(uri).is_empty() {
+            return; // WebView2 would hand back its generic globe; keep the letter icon
+        }
         let generation = fetched.generation;
         let handler = GetFaviconCompletedHandler::create(Box::new(move |_, stream| {
             let Some(bytes) = stream.as_ref().and_then(read_stream) else {
@@ -1126,7 +1157,11 @@ impl App {
         let title = read(&|p| unsafe { n.Title(p) });
         let body = read(&|p| unsafe { n.Body(p) });
         let app_name = tv.tab.borrow().name.clone();
-        let title = if title.is_empty() { app_name.clone() } else { title };
+        let title = if title.is_empty() {
+            app_name.clone()
+        } else {
+            title
+        };
         let body = if body.is_empty() {
             app_name
         } else {
@@ -1140,8 +1175,8 @@ impl App {
             *tv.notification.borrow_mut() = Some(n.clone());
             // The page closing its notification withdraws ours if it's still showing.
             let id = tv.id;
-            let handler = NotificationCloseRequestedEventHandler::create(Box::new(
-                move |sender, _| {
+            let handler =
+                NotificationCloseRequestedEventHandler::create(Box::new(move |sender, _| {
                     with_tab(id, |app, tv| {
                         let latest = tv.notification.borrow().as_ref() == sender.as_ref();
                         if latest {
@@ -1152,8 +1187,7 @@ impl App {
                         }
                     });
                     Ok(())
-                },
-            ));
+                }));
             let mut token = 0;
             unsafe {
                 let _ = n.add_CloseRequested(&handler, &mut token);
@@ -1315,17 +1349,48 @@ impl App {
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         unsafe {
             if from_tray {
-                let label = if self.is_visible() { "Hide webtabs" } else { "Show webtabs" };
+                let label = if self.is_visible() {
+                    "Hide webtabs"
+                } else {
+                    "Show webtabs"
+                };
                 let _ = AppendMenuW(menu, MF_STRING, CMD_SHOW as usize, &HSTRING::from(label));
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             }
-            let _ = AppendMenuW(menu, MF_STRING, CMD_EDIT_CONFIG as usize, w!("Edit tabs.toml\u{2026}"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_EDIT_CONFIG as usize,
+                w!("Edit tabs.toml\u{2026}"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING | check(cfg.notifications), CMD_NOTIFICATIONS as usize, w!("Notifications"));
-            let _ = AppendMenuW(menu, MF_STRING | check(cfg.unread_in_title), CMD_UNREAD_TITLE as usize, w!("Unread count in window title"));
-            let _ = AppendMenuW(menu, MF_STRING | check(cfg.tray), CMD_TRAY as usize, w!("Tray icon"));
-            let close_flags = MF_STRING | check(cfg.close_to_tray) | if cfg.tray { MF_ENABLED } else { MF_GRAYED };
-            let _ = AppendMenuW(menu, close_flags, CMD_CLOSE_TO_TRAY as usize, w!("Closing the window keeps webtabs in the tray"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(cfg.notifications),
+                CMD_NOTIFICATIONS as usize,
+                w!("Notifications"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(cfg.unread_in_title),
+                CMD_UNREAD_TITLE as usize,
+                w!("Unread count in window title"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(cfg.tray),
+                CMD_TRAY as usize,
+                w!("Tray icon"),
+            );
+            let close_flags = MF_STRING
+                | check(cfg.close_to_tray)
+                | if cfg.tray { MF_ENABLED } else { MF_GRAYED };
+            let _ = AppendMenuW(
+                menu,
+                close_flags,
+                CMD_CLOSE_TO_TRAY as usize,
+                w!("Closing the window keeps webtabs in the tray"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, w!("Quit\tCtrl+Q"));
         }
@@ -1349,10 +1414,20 @@ impl App {
         };
         unsafe {
             for (i, p) in presets::PRESETS.iter().enumerate() {
-                let _ = AppendMenuW(menu, MF_STRING, (CMD_PRESET as usize) + i, &HSTRING::from(p.name));
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    (CMD_PRESET as usize) + i,
+                    &HSTRING::from(p.name),
+                );
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, CMD_CUSTOM_TAB as usize, w!("Other site (edit tabs.toml)\u{2026}"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_CUSTOM_TAB as usize,
+                w!("Other site (edit tabs.toml)\u{2026}"),
+            );
         }
         match self.popup_menu(menu, Some(at)) {
             CMD_CUSTOM_TAB => self.edit_config(),
@@ -1360,11 +1435,27 @@ impl App {
                 if let Some(p) = presets::PRESETS.get((cmd - CMD_PRESET) as usize) {
                     let mut tab = Tab::new(p.name, p.url, None);
                     // A second account of the same service needs its own logins.
-                    let existing: Vec<Tab> =
-                        self.all_views().iter().map(|t| t.tab.borrow().clone()).collect();
-                    if existing.iter().any(|t| t.url == tab.url && t.session.is_none()) {
-                        let taken: Vec<&str> =
-                            existing.iter().filter_map(|t| t.session.as_deref()).collect();
+                    let existing: Vec<Tab> = self
+                        .all_views()
+                        .iter()
+                        .map(|t| t.tab.borrow().clone())
+                        .collect();
+                    // Same rule as the Linux dialog's hint: a tab on the same site shares logins.
+                    let site_of = |u: &str| {
+                        url::Url::parse(u)
+                            .ok()
+                            .and_then(|u| u.host_str().map(links::site))
+                    };
+                    let site = site_of(&tab.url);
+                    if site.is_some()
+                        && existing
+                            .iter()
+                            .any(|t| t.session.is_none() && site_of(&t.url) == site)
+                    {
+                        let taken: Vec<&str> = existing
+                            .iter()
+                            .filter_map(|t| t.session.as_deref())
+                            .collect();
                         tab.session = Some(config::new_session_key(&tab.name, &taken));
                     }
                     self.add_tab(tab);
@@ -1381,14 +1472,34 @@ impl App {
         let notify = tv.tab.borrow().notifications;
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING, CMD_RELOAD as usize, w!("Reload\tCtrl+R"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_HOME as usize, w!("Go to home page\tAlt+Home"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_HOME as usize,
+                w!("Go to home page\tAlt+Home"),
+            );
             let _ = AppendMenuW(menu, MF_STRING, CMD_LEFT as usize, w!("Move left"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_RIGHT as usize, w!("Move right"));
             let flags = MF_STRING | if notify { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(menu, flags, CMD_TAB_NOTIFY as usize, w!("Notifications from this tab"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_DEVTOOLS as usize, w!("Inspect (DevTools)\tF12"));
+            let _ = AppendMenuW(
+                menu,
+                flags,
+                CMD_TAB_NOTIFY as usize,
+                w!("Notifications from this tab"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_DEVTOOLS as usize,
+                w!("Inspect (DevTools)\tF12"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, CMD_EDIT_CONFIG as usize, w!("Edit tabs.toml\u{2026}"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_EDIT_CONFIG as usize,
+                w!("Edit tabs.toml\u{2026}"),
+            );
             let _ = AppendMenuW(menu, MF_STRING, CMD_REMOVE as usize, w!("Remove"));
         }
         match self.popup_menu(menu, None) {
@@ -1673,10 +1784,7 @@ impl App {
                     }
                 }
             }
-            WM_KEYDOWN | WM_SYSKEYDOWN => match key_for(wparam.0 as u32, modifiers()) {
-                Some(key) => self.run_key(key),
-                None => return None,
-            },
+            WM_KEYDOWN | WM_SYSKEYDOWN => self.run_key(key_for(wparam.0 as u32, modifiers())?),
             WM_APP_KEY => {
                 if let Some(key) = key_for(wparam.0 as u32, lparam.0 as usize) {
                     self.run_key(key);
@@ -1779,4 +1887,3 @@ fn read_stream(stream: &IStream) -> Option<Vec<u8>> {
     }
     (!out.is_empty()).then_some(out)
 }
-

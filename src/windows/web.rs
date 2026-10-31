@@ -5,6 +5,9 @@ use crate::config::Config;
 use crate::config::Tab;
 use crate::links::{self, Target};
 use ::windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use ::windows::Win32::System::SystemInformation::GetTickCount;
+use ::windows::Win32::System::Threading::GetCurrentProcessId;
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{HSTRING, Interface, PCWSTR, PWSTR, w};
@@ -12,9 +15,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::result::Result;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::*;
-use std::result::Result;
 
 /// Home URL of the tab that owns a webview (or popup), read live so edits apply.
 pub type UrlFn = Rc<dyn Fn() -> String>;
@@ -47,16 +50,14 @@ pub fn user_agent_override<'a>(cfg: &'a Config, tab: &'a Tab) -> Option<&'a str>
     tab.user_agent.as_deref().or(cfg.user_agent.as_deref())
 }
 
-pub fn create_environment(
-    done: impl FnOnce(Result<ICoreWebView2Environment, String>) + 'static,
-) {
+pub fn create_environment(done: impl FnOnce(Result<ICoreWebView2Environment, String>) + 'static) {
     let dir = user_data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let options = CoreWebView2EnvironmentOptions::default();
     let done = Rc::new(RefCell::new(Some(done)));
     let finish = done.clone();
-    let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
-        move |result, env| {
+    let handler =
+        CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |result, env| {
             let out = match (result, env) {
                 (Ok(()), Some(env)) => Ok(env),
                 (Err(e), _) => Err(e.message()),
@@ -66,8 +67,7 @@ pub fn create_environment(
                 f(out);
             }
             Ok(())
-        },
-    ));
+        }));
     let options: ICoreWebView2EnvironmentOptions = options.into();
     let result = unsafe {
         CreateCoreWebView2EnvironmentWithOptions(
@@ -198,7 +198,9 @@ pub fn pregrant_notifications(wv: &ICoreWebView2, url: &str, then: impl FnOnce()
     let then = Rc::new(RefCell::new(Some(then)));
     let run = then.clone();
     let result = (|| -> ::windows::core::Result<()> {
-        let origin = origin_of(url).ok_or_else(|| ::windows::core::Error::from_hresult(::windows::Win32::Foundation::E_INVALIDARG))?;
+        let origin = origin_of(url).ok_or_else(|| {
+            ::windows::core::Error::from_hresult(::windows::Win32::Foundation::E_INVALIDARG)
+        })?;
         let profile = unsafe { wv.cast::<ICoreWebView2_13>()?.Profile()? };
         let profile4: ICoreWebView2Profile4 = profile.cast()?;
         let handler = SetPermissionStateCompletedHandler::create(Box::new(move |_| {
@@ -221,6 +223,33 @@ pub fn pregrant_notifications(wv: &ICoreWebView2, url: &str, then: impl FnOnce()
     {
         f();
     }
+}
+
+/// How recent a real click or key press must be for a page action to count as
+/// the user's. Link clicks reach us within milliseconds.
+const GESTURE_WINDOW_MS: u32 = 1500;
+
+/// WebView2's `IsUserInitiated` follows Chromium's transient activation and also
+/// covers navigations the host started, so on its own a page can push links out
+/// of the app (seen: `window.open` 2 s after load reported as user-initiated).
+/// Leaving the app also needs fresh real input while one of our windows is in front.
+pub fn user_gesture(reported: bool) -> bool {
+    if !reported {
+        return false;
+    }
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    let recent = unsafe {
+        GetLastInputInfo(&mut info).as_bool()
+            && GetTickCount().wrapping_sub(info.dwTime) < GESTURE_WINDOW_MS
+    };
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+    }
+    recent && pid == unsafe { GetCurrentProcessId() }
 }
 
 /// Hands a link to the desktop's default handler (http/https/mailto/tel only).
@@ -300,7 +329,7 @@ pub fn setup_common(
         }
         let uri = take_pwstr(uri);
         if uri.starts_with("http")
-            && user.as_bool()
+            && user_gesture(user.as_bool())
             && !redirected.as_bool()
             && links::route(&url_fn(), &uri) == Target::External
         {
@@ -325,8 +354,9 @@ pub fn setup_common(
                 args.SetCancel(true)?;
             }
             let uri = take_pwstr(uri);
-            debug!("external scheme {uri} (user: {})", user.as_bool());
-            if user.as_bool() {
+            let user = user_gesture(user.as_bool());
+            debug!("external scheme {uri} (user: {user})");
+            if user {
                 open_external(&uri);
             }
             Ok(())
@@ -346,17 +376,17 @@ pub fn setup_common(
             args.IsUserInitiated(&mut user)?;
         }
         let uri = take_pwstr(uri);
-        debug!("new window {uri} (user: {})", user.as_bool());
+        let reported = user.as_bool();
+        let user = user_gesture(reported);
+        debug!("new window {uri} (user: {user}, reported: {reported})");
         match links::route(&home(), &uri) {
             Target::External => {
                 unsafe { args.SetHandled(true)? };
-                if user.as_bool() {
+                if user {
                     open_external(&uri);
                 }
             }
-            Target::InApp => {
-                open_popup(&env, &args, home.clone(), profile.clone(), owner, user.as_bool())
-            }
+            Target::InApp => open_popup(&env, &args, home.clone(), profile.clone(), owner, user),
         }
         Ok(())
     }));
@@ -473,8 +503,7 @@ fn open_popup(
             let _ = args.SetNewWindow(&wv);
         }
         POPUPS.with(|p| {
-            p.borrow_mut()
-                .insert(hwnd.0 as isize, Popup { controller });
+            p.borrow_mut().insert(hwnd.0 as isize, Popup { controller });
         });
         done(&args);
     });
@@ -526,7 +555,11 @@ fn setup_popup(
     let handler = DocumentTitleChangedEventHandler::create(Box::new(move |sender, _| {
         if let Some(wv) = sender {
             let t = title(&wv);
-            let t = if t.is_empty() { "webtabs".to_string() } else { t };
+            let t = if t.is_empty() {
+                "webtabs".to_string()
+            } else {
+                t
+            };
             unsafe {
                 let _ = SetWindowTextW(HWND(hwnd_raw as _), &HSTRING::from(t));
             }
@@ -595,4 +628,3 @@ pub fn focus(controller: &ICoreWebView2Controller) {
         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     }
 }
-

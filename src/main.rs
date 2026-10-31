@@ -6,7 +6,8 @@
 mod autostart;
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod badge;
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+// User-agent presets and the cache dir only matter to the WebKit front ends.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod config;
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod favicon;
@@ -14,10 +15,10 @@ mod favicon;
 mod links;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "windows")]
-mod windows;
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod presets;
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {

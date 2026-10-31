@@ -159,7 +159,8 @@ fn centered(cell: RECT, size: i32) -> RECT {
     }
 }
 
-const CENTER: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0 | DT_NOPREFIX.0);
+const CENTER: DRAW_TEXT_FORMAT =
+    DRAW_TEXT_FORMAT(DT_CENTER.0 | DT_VCENTER.0 | DT_SINGLELINE.0 | DT_NOPREFIX.0);
 
 pub fn paint(app: &App) {
     let mut ps = PAINTSTRUCT::default();
@@ -227,9 +228,15 @@ fn draw(app: &App, hdc: HDC, client: RECT) {
                 Some(img) => g.image(img, r),
                 None => {
                     let name = tv.tab.borrow().name.clone();
-                    let hash = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+                    let hash = name
+                        .bytes()
+                        .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
                     g.round_rect(PALETTE[hash as usize % PALETTE.len()], r, px(7));
-                    let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                    let letter: String = name
+                        .chars()
+                        .next()
+                        .map(|c| c.to_uppercase().collect())
+                        .unwrap_or_default();
                     letters.push((letter, r));
                 }
             }
@@ -245,8 +252,22 @@ fn draw(app: &App, hdc: HDC, client: RECT) {
     for (letter, r) in &letters {
         text(hdc, &letter_font, 0xffffff, letter, *r, CENTER);
     }
-    text(hdc, &glyph_font, 0x333333, "\u{E710}", app.cell_rect(Hit::Add), CENTER);
-    text(hdc, &glyph_font, 0x333333, "\u{E713}", app.cell_rect(Hit::Gear), CENTER);
+    text(
+        hdc,
+        &glyph_font,
+        0x333333,
+        "\u{E710}",
+        app.cell_rect(Hit::Add),
+        CENTER,
+    );
+    text(
+        hdc,
+        &glyph_font,
+        0x333333,
+        "\u{E713}",
+        app.cell_rect(Hit::Gear),
+        CENTER,
+    );
 
     // Pass 3: unread bubbles (top-right) and tags (bottom-left), then their text.
     let mut labels = Vec::new();
@@ -295,7 +316,14 @@ fn draw(app: &App, hdc: HDC, client: RECT) {
             bottom,
             ..client
         };
-        text(hdc, &title, 0x222222, "No tabs yet", row(mid - px(40), mid), CENTER);
+        text(
+            hdc,
+            &title,
+            0x222222,
+            "No tabs yet",
+            row(mid - px(40), mid),
+            CENTER,
+        );
         text(
             hdc,
             &hint,

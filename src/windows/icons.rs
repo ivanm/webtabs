@@ -5,8 +5,8 @@
 use crate::favicon::cache_path;
 use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use ::windows::Win32::Graphics::GdiPlus::*;
-use ::windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use ::windows::Win32::System::Com::Urlmon::URLDownloadToFileW;
+use ::windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use ::windows::Win32::UI::Shell::SHCreateMemStream;
 use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use ::windows::core::HSTRING;
@@ -140,7 +140,9 @@ fn download(url: &str, tmp: &Path) -> Option<Vec<u8>> {
         )
         .ok()?;
     }
-    std::fs::read(tmp).ok().filter(|b| b.len() <= MAX_ICON_BYTES)
+    std::fs::read(tmp)
+        .ok()
+        .filter(|b| b.len() <= MAX_ICON_BYTES)
 }
 
 /// `image/png;base64,...` (the part after `data:`). SVG is skipped.
