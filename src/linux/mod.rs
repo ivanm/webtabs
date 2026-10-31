@@ -27,6 +27,11 @@ use webkit2gtk::{WebContext, WebView};
 const APP_ID: &str = "dev.vaan.webtabs";
 const ICON: &str = include_str!("../../assets/webtabs.svg");
 const ICON_UNREAD: &str = include_str!("../../assets/webtabs-unread.svg");
+/// Tray mark (same as the macOS menu bar icon), light for dark panels.
+const TRAY_ICON: &str = include_str!("../../assets/webtabs-tray.svg");
+const TRAY_ICON_UNREAD: &str = include_str!("../../assets/webtabs-tray-unread.svg");
+/// Desktop file the launcher badge is keyed by (see packaging/webtabs.desktop).
+const LAUNCHER_APP_URI: &str = "application://webtabs.desktop";
 const TAB_ICON_PX: i32 = 32;
 const CSS: &str = "
 .tabbar { padding: 2px 6px; border-bottom: 1px solid alpha(currentColor, 0.12); }
@@ -91,8 +96,12 @@ struct App {
     window: gtk::ApplicationWindow,
     /// Holds one webview per tab plus the "empty" page.
     stack: gtk::Stack,
+    /// The whole bar (tabs, "+", gear); hidden while a page is fullscreen.
+    bar: gtk::Box,
     /// Tab buttons, in tab order; the "+" button sits right after it.
     tab_bar: gtk::Box,
+    /// Tab whose page is fullscreen (0 = none).
+    fullscreen: Cell<u64>,
     current: Cell<u64>,
     /// Shared profile used by every non-isolated tab.
     context: WebContext,
@@ -106,6 +115,8 @@ struct App {
     next_id: Cell<u64>,
     reload_pending: Cell<bool>,
     last_unread: Cell<u32>,
+    /// Last launcher badge sent (count, visible), so unchanged state isn't resent.
+    last_launcher: Cell<Option<(u32, bool)>>,
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while the settings window is open, so App changes show up in it.
     settings_refresh: RefCell<Option<Rc<dyn Fn()>>>,
@@ -220,7 +231,9 @@ impl App {
             gapp: gapp.clone(),
             window,
             stack,
+            bar,
             tab_bar,
+            fullscreen: Cell::new(0),
             current: Cell::new(0),
             context: web::new_context(None),
             isolated: RefCell::default(),
@@ -232,6 +245,7 @@ impl App {
             next_id: Cell::new(1),
             reload_pending: Cell::new(false),
             last_unread: Cell::new(0),
+            last_launcher: Cell::default(),
             monitor: RefCell::default(),
             settings_refresh: RefCell::default(),
             settings_close_row: RefCell::default(),
@@ -422,9 +436,10 @@ impl App {
     }
 
     fn setup_tray(self: &Rc<Self>, icon_dir: &std::path::Path) {
-        let mut tray = AppIndicator::with_path("webtabs", "webtabs", &icon_dir.to_string_lossy());
+        let mut tray =
+            AppIndicator::with_path("webtabs", "webtabs-tray", &icon_dir.to_string_lossy());
         tray.set_title("webtabs");
-        tray.set_attention_icon_full("webtabs-unread", "Unread messages");
+        tray.set_attention_icon_full("webtabs-tray-unread", "Unread messages");
         tray.set_status(AppIndicatorStatus::Active);
 
         let menu = gtk::Menu::new();
@@ -621,6 +636,24 @@ impl App {
                 app.fetch_icon(&tv, wv);
             }
         });
+        // Fullscreen video: the default handler fullscreens the window; hide the
+        // bar so the page really fills the screen.
+        let (app_w, tab_w) = (Rc::downgrade(self), Rc::downgrade(&tv));
+        webview.connect_enter_fullscreen(move |_| {
+            if let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade()) {
+                app.fullscreen.set(tv.id);
+                app.bar.hide();
+            }
+            false
+        });
+        let app_w = Rc::downgrade(self);
+        webview.connect_leave_fullscreen(move |_| {
+            if let Some(app) = app_w.upgrade() {
+                app.fullscreen.set(0);
+                app.bar.show();
+            }
+            false
+        });
         let (app_w, tab_w) = (Rc::downgrade(self), Rc::downgrade(&tv));
         webview.connect_show_notification(move |_, n| {
             if let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade()) {
@@ -693,6 +726,9 @@ impl App {
     // ---- selection & ordering ------------------------------------------------
 
     fn select(&self, tv: &Rc<TabView>) {
+        if self.fullscreen.get() != tv.id {
+            self.exit_fullscreen();
+        }
         self.current.set(tv.id);
         self.stack.set_visible_child(&tv.webview);
         for t in self.tabs.borrow().iter() {
@@ -788,8 +824,31 @@ impl App {
         self.refresh_unread();
     }
 
+    /// Leaves page fullscreen (e.g. switching tabs with a shortcut). The page gets
+    /// the normal exit; the bar and window are restored here in case it never answers.
+    fn exit_fullscreen(&self) {
+        let id = self.fullscreen.replace(0);
+        if id == 0 {
+            return;
+        }
+        if let Some(tv) = self.tabs.borrow().iter().find(|t| t.id == id) {
+            tv.webview.evaluate_javascript(
+                "document.fullscreenElement && document.exitFullscreen()",
+                None,
+                None,
+                None::<&gio::Cancellable>,
+                |_| {},
+            );
+        }
+        self.window.unfullscreen();
+        self.bar.show();
+    }
+
     /// Drops a tab's widgets and web process.
     fn detach(&self, tv: &TabView) {
+        if self.fullscreen.get() == tv.id {
+            self.exit_fullscreen();
+        }
         self.stack.remove(&tv.webview);
         self.tab_bar.remove(&tv.button);
         tv.webview.try_close();
@@ -981,8 +1040,9 @@ impl App {
         let any = tabs.iter().any(|t| t.badge.get().is_unread());
         drop(tabs);
         let cfg = self.config.borrow();
-        let (in_title, tray_on) = (cfg.unread_in_title, cfg.tray);
+        let (in_title, tray_on, in_launcher) = (cfg.unread_in_title, cfg.tray, cfg.unread_in_dock);
         drop(cfg);
+        self.update_launcher(total, in_launcher && total > 0);
         self.window.set_title(&if total > 0 && in_title {
             format!("webtabs ({total})")
         } else {
@@ -1001,6 +1061,32 @@ impl App {
             self.window.set_urgency_hint(true);
         }
         self.last_unread.set(total);
+    }
+
+    /// Unread count on the dock/launcher icon via the `com.canonical.Unity.LauncherEntry`
+    /// signal (KDE, Dash-to-Dock, Plank; panels without support ignore it).
+    fn update_launcher(&self, count: u32, visible: bool) {
+        let state = (if visible { count } else { 0 }, visible);
+        if self.last_launcher.replace(Some(state)) == Some(state) {
+            return;
+        }
+        let Some(bus) = self.gapp.dbus_connection() else {
+            return;
+        };
+        let props = glib::VariantDict::new(None);
+        props.insert("count", i64::from(state.0));
+        props.insert("count-visible", visible);
+        // (sa{sv}): build the tuple from the parts so the dict isn't boxed as `v`.
+        let args = glib::Variant::tuple_from_iter([LAUNCHER_APP_URI.to_variant(), props.end()]);
+        if let Err(e) = bus.emit_signal(
+            None,
+            "/dev/vaan/webtabs",
+            "com.canonical.Unity.LauncherEntry",
+            "Update",
+            Some(&args),
+        ) {
+            eprintln!("webtabs: launcher badge: {e}");
+        }
     }
 
     fn notify(&self, tv: &Rc<TabView>, n: &webkit2gtk::Notification) {
@@ -1323,7 +1409,12 @@ fn install_css() {
 fn write_icons() -> PathBuf {
     let dir = config::data_dir().join("icons");
     let _ = std::fs::create_dir_all(&dir);
-    for (name, svg) in [("webtabs.svg", ICON), ("webtabs-unread.svg", ICON_UNREAD)] {
+    for (name, svg) in [
+        ("webtabs.svg", ICON),
+        ("webtabs-unread.svg", ICON_UNREAD),
+        ("webtabs-tray.svg", TRAY_ICON),
+        ("webtabs-tray-unread.svg", TRAY_ICON_UNREAD),
+    ] {
         let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(svg) {
             let _ = std::fs::write(&path, svg);

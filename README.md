@@ -119,7 +119,7 @@ deletes its login data.
 
 Use `+` to add a tab, right-click a tab to edit, move or remove it, or open
 **settings with the gear** (top right). Settings has the app switches (start with
-computer, notifications, tray icon, close to tray, unread count in title) and the
+computer, notifications, tray icon, close to tray, unread count in title and on the launcher icon) and the
 tab list, where you can reorder tabs and mute notifications per tab.
 
 Everything is stored in `~/.config/webtabs/tabs.toml`, which you can also edit by
@@ -131,7 +131,7 @@ notifications = true
 tray = true
 close_to_tray = true
 unread_in_title = true
-unread_in_dock = true          # macOS: unread count on the Dock icon
+unread_in_dock = true          # unread count on the Dock (macOS) / launcher icon (Linux)
 # user_agent = "..."            # global override (default: Safari)
 
 [[tab]]
@@ -170,7 +170,10 @@ Middle-click a tab to reload it.
 
 - **Unread badges** come from page titles (`(3) WhatsApp`, `Inbox (12)`, `* Slack`).
   The total shows in the window title. The tray icon switches to its unread
-  variant and the taskbar entry flashes.
+  variant and the taskbar entry flashes. Docks that support launcher badges
+  (KDE, Dash-to-Dock, Plank) show the count on the icon; Cinnamon's panel doesn't.
+- **Fullscreen video** (YouTube, Meet...) fills the screen and hides the tab bar;
+  Escape or switching tabs brings it back.
 - **Notifications** become desktop notifications, unless they're turned off in
   settings or muted for that tab. Clicking one opens the right tab
   and the page jumps to that chat or email.

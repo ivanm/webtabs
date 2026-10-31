@@ -32,7 +32,7 @@ const HEADER: &str = "\
 # tray            = true    # show the tray icon
 # close_to_tray   = true    # closing the window keeps the app running in the tray
 # unread_in_title = true    # total unread count in the window title
-# unread_in_dock  = true    # unread count on the Dock icon (macOS)
+# unread_in_dock  = true    # unread count on the Dock / launcher icon
 # user_agent      = \"...\"   # global user-agent override (default: Safari)
 #
 # [[tab]]
@@ -55,7 +55,8 @@ pub struct Config {
     pub close_to_tray: bool,
     #[serde(default = "default_true")]
     pub unread_in_title: bool,
-    /// macOS only: unread count on the Dock icon. Ignored on Linux.
+    /// Unread count on the Dock icon (macOS) or launcher icon (Linux docks and
+    /// panels that support `com.canonical.Unity.LauncherEntry`).
     #[serde(default = "default_true")]
     pub unread_in_dock: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

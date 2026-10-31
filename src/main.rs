@@ -38,6 +38,6 @@ fn main() {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("webtabs: this platform's backend is not implemented yet (macOS is next)");
+    eprintln!("webtabs: this platform is not supported (Linux and macOS only)");
     std::process::exit(1);
 }

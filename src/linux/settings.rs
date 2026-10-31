@@ -99,6 +99,13 @@ pub fn open(app: &Rc<App>) {
         |c| c.unread_in_title,
         |c, v| c.unread_in_title = v,
     );
+    opt(
+        &general,
+        "Unread count on launcher icon",
+        "Badge on the dock or panel icon, where supported",
+        |c| c.unread_in_dock,
+        |c, v| c.unread_in_dock = v,
+    );
     // Closing to a tray that isn't there would make the app unreachable.
     close.set_sensitive(app.config.borrow().tray);
     app.settings_close_row.replace(Some(close.downgrade()));
