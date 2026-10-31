@@ -198,13 +198,18 @@ impl Config {
     }
 
     /// Atomic write (temp file + rename) so the file watcher never sees half a file.
+    /// A symlinked config (dotfiles) stays a symlink: we write through to its target.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent() {
+        let target = match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+            _ => path.to_path_buf(),
+        };
+        if let Some(dir) = target.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("toml.tmp");
+        let tmp = target.with_extension("toml.tmp");
         fs::write(&tmp, self.to_toml())?;
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, &target)
     }
 }
 
@@ -369,6 +374,29 @@ mod tests {
         assert_eq!(new_session_key("Gmail (work)", &[]), "gmail-work");
         assert_eq!(new_session_key("  ", &[]), "tab");
         assert_eq!(new_session_key("Ñandú", &[]), "and");
+    }
+
+    #[test]
+    fn save_keeps_symlinks() {
+        let dir = std::env::temp_dir().join(format!("webtabs-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let real = dir.join("dotfiles/tabs.toml");
+        let link = dir.join("tabs.toml");
+        fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        Config::default().save(&link).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            Config::parse(&fs::read_to_string(&real).unwrap()).unwrap(),
+            Config::default()
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

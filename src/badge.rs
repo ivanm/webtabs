@@ -54,7 +54,10 @@ fn first_bracketed_count(title: &str) -> Option<u32> {
             _ => continue,
         };
         let rest = &title[i + 1..];
-        let end = rest.find(close as char)?;
+        // An unclosed bracket ("(draft [3]") must not hide a later count.
+        let Some(end) = rest.find(close as char) else {
+            continue;
+        };
         let inner = rest[..end].trim().trim_end_matches('+');
         if !inner.is_empty()
             && inner.len() <= 6
@@ -87,6 +90,7 @@ mod tests {
             ("(0) Chat", Badge::None),
             ("Meeting (notes) (4)", Badge::Count(4)),
             ("Broken (12", Badge::None),
+            ("(draft [3] Element", Badge::Count(3)),
             ("", Badge::None),
         ];
         for (title, want) in cases {

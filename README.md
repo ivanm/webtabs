@@ -85,12 +85,15 @@ Middle-click a tab to reload it.
   settings or muted for that tab. Clicking one opens the right tab
   and the page jumps to that chat or email.
 - **Links:** links you click to other sites open in your default browser. Same-site
-  windows and logins (Google, Microsoft, Okta, Apple, GitHub) open in a small
-  in-app popup so they finish inside the app's session.
-- **Permissions:** notifications, camera/mic (for Meet) and DRM are granted.
-  Location is denied.
-- A crashed tab reloads itself. A broken `tabs.toml` is ignored (with a
-  notification) until you fix it.
+  windows and logins (Google, Microsoft, Okta, Apple, GitHub sign-in) open in a
+  small in-app popup so they finish inside the app's session. A page can't open
+  your browser or launch other apps by itself: that needs a real click, and only
+  web, mail and phone links are handed out.
+- **Permissions:** notifications and camera/mic (for Meet) are granted only to the
+  tab's own site; DRM is allowed. Location is denied. Pages can't read your
+  clipboard (your own copy/paste works as usual).
+- A crashed tab reloads itself (at most 3 times a minute). A broken `tabs.toml`
+  is ignored (with a notification) until you fix it.
 
 ## Develop
 

@@ -11,12 +11,30 @@ const AUTH_HOSTS: &[&str] = &[
     "login.microsoftonline.com",
     "login.live.com",
     "appleid.apple.com",
-    "github.com",
     "okta.com",
     "auth0.com",
     "onelogin.com",
     "duosecurity.com",
 ];
+
+/// Sites that are only auth on specific paths ("Sign in with GitHub"), not the
+/// whole host: a PR link shared in Slack must still open in the real browser.
+const AUTH_PATHS: &[(&str, &[&str])] = &[("github.com", &["/login", "/session"])];
+
+/// Schemes we hand to the desktop. Anything else (`file:`, custom app schemes a
+/// page could use to launch local programs) is dropped.
+const EXTERNAL_SCHEMES: &[&str] = &["http", "https", "mailto", "tel"];
+
+pub fn is_safe_external(uri: &str) -> bool {
+    Url::parse(uri).is_ok_and(|u| EXTERNAL_SCHEMES.contains(&u.scheme()))
+}
+
+/// Same registrable site, e.g. a Meet popup (meet.google.com) opened from a
+/// Calendar tab (calendar.google.com). Used to scope camera/mic grants.
+pub fn same_site(a: &str, b: &str) -> bool {
+    let site_of = |u: &str| Url::parse(u).ok().and_then(|u| u.host_str().map(site));
+    matches!((site_of(a), site_of(b)), (Some(x), Some(y)) if x == y)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -40,7 +58,7 @@ pub fn route(tab_url: &str, target: &str) -> Target {
     let Some(host) = target.host_str() else {
         return Target::External;
     };
-    if is_auth_host(host) {
+    if is_auth_host(host) || is_auth_path(host, target.path()) {
         return Target::InApp;
     }
     let tab_site = Url::parse(tab_url)
@@ -51,6 +69,12 @@ pub fn route(tab_url: &str, target: &str) -> Target {
     } else {
         Target::External
     }
+}
+
+fn is_auth_path(host: &str, path: &str) -> bool {
+    AUTH_PATHS
+        .iter()
+        .any(|(h, paths)| host == *h && paths.iter().any(|p| path.starts_with(p)))
 }
 
 fn is_auth_host(host: &str) -> bool {
@@ -90,6 +114,44 @@ mod tests {
         assert_eq!(site("web.whatsapp.com"), "whatsapp.com");
         assert_eq!(site("192.168.1.10"), "192.168.1.10");
         assert_eq!(site("localhost"), "localhost");
+    }
+
+    #[test]
+    fn github_only_auth_paths_stay_in_app() {
+        let slack = "https://app.slack.com/client";
+        assert_eq!(
+            route(slack, "https://github.com/ivanm/webtabs/pull/1"),
+            External
+        );
+        assert_eq!(
+            route(slack, "https://github.com/login/oauth/authorize?x=1"),
+            InApp
+        );
+        assert_eq!(
+            route(slack, "https://github.com/sessions/two-factor"),
+            InApp
+        );
+    }
+
+    #[test]
+    fn external_scheme_allowlist() {
+        assert!(is_safe_external("https://example.com"));
+        assert!(is_safe_external("mailto:a@b.com"));
+        assert!(is_safe_external("tel:+123"));
+        assert!(!is_safe_external("file:///etc/passwd"));
+        assert!(!is_safe_external("audittest://pwn"));
+        assert!(!is_safe_external("javascript:alert(1)"));
+        assert!(!is_safe_external("not a url"));
+    }
+
+    #[test]
+    fn same_site_matching() {
+        assert!(same_site(
+            "https://calendar.google.com/",
+            "https://meet.google.com/abc"
+        ));
+        assert!(!same_site("https://app.slack.com/", "https://evil.com/"));
+        assert!(!same_site("about:blank", "https://a.com"));
     }
 
     #[test]

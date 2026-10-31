@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use webkit2gtk::{
     DownloadExt, LoadEvent, NotificationExt, SettingsExt, WebContextExt, WebInspectorExt,
-    WebViewExt,
+    WebViewExt, WebsiteDataManagerExtManual,
 };
 use webkit2gtk::{WebContext, WebView};
 
@@ -110,6 +110,9 @@ struct App {
     /// Set while the settings window is open, so App changes show up in it.
     settings_refresh: RefCell<Option<Rc<dyn Fn()>>>,
     settings_close_row: RefCell<Option<glib::WeakRef<gtk::ListBoxRow>>>,
+    settings_window: RefCell<Option<glib::WeakRef<gtk::Dialog>>>,
+    /// Isolated-session data scheduled for deletion; cancelled if the key returns.
+    pending_deletes: RefCell<HashMap<String, glib::SourceId>>,
 }
 
 type TabAction = dyn Fn(&Rc<App>, &Rc<TabView>);
@@ -124,6 +127,8 @@ struct TabView {
     icon: gtk::Image,
     pixbuf: RefCell<Option<Pixbuf>>,
     icon_fetched: Cell<bool>,
+    /// Bumped when the tab's URL changes, so a slow fetch for the old URL is ignored.
+    icon_gen: Cell<u64>,
     badge: Cell<Badge>,
     loaded: Cell<bool>,
     notification: RefCell<Option<webkit2gtk::Notification>>,
@@ -230,6 +235,8 @@ impl App {
             monitor: RefCell::default(),
             settings_refresh: RefCell::default(),
             settings_close_row: RefCell::default(),
+            settings_window: RefCell::default(),
+            pending_deletes: RefCell::default(),
         });
 
         let weak = Rc::downgrade(&app);
@@ -246,6 +253,7 @@ impl App {
 
         let tabs: Vec<_> = cfg.tabs.iter().map(|t| app.create_tab(t)).collect();
         *app.tabs.borrow_mut() = tabs;
+        app.purge_stale_sessions();
         app.window.show_all();
         app.window.hide();
         app.update_empty_state();
@@ -259,6 +267,11 @@ impl App {
     fn show(&self) {
         self.window.show();
         self.window.present();
+    }
+
+    fn can_hide_to_tray(&self) -> bool {
+        let cfg = self.config.borrow();
+        cfg.tray && cfg.close_to_tray && self.tray.borrow().is_some()
     }
 
     fn toggle_visible(&self) {
@@ -275,10 +288,7 @@ impl App {
             let Some(app) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
-            let cfg = app.config.borrow();
-            let to_tray = cfg.tray && cfg.close_to_tray && app.tray.borrow().is_some();
-            drop(cfg);
-            if to_tray {
+            if app.can_hide_to_tray() {
                 win.hide();
             } else {
                 app.gapp.quit();
@@ -355,7 +365,12 @@ impl App {
                 }
             }
             (true, false, false) if k == key::comma => settings::open(self),
-            (true, false, false) if k == key::w => self.window.hide(),
+            (true, false, false) if k == key::w => {
+                // Never hide into a tray that isn't there.
+                if self.can_hide_to_tray() {
+                    self.window.hide();
+                }
+            }
             (true, false, false) if k == key::q => self.gapp.quit(),
             (false, false, true) if k == key::Left => wv.iter().for_each(|w| w.go_back()),
             (false, false, true) if k == key::Right => wv.iter().for_each(|w| w.go_forward()),
@@ -497,7 +512,19 @@ impl App {
         let cfg = self.config.borrow();
         let settings = web::new_settings(cfg.user_agent_for(tab));
         drop(cfg);
-        let webview = web::new_webview(&self.context_for(tab), &settings);
+        // The webview needs its tab's home URL (permissions, routing) before the
+        // TabView exists; fill the slot right after creating it.
+        let slot: Rc<RefCell<Weak<TabView>>> = Rc::default();
+        let home: web::UrlFn = {
+            let slot = slot.clone();
+            Rc::new(move || {
+                slot.borrow()
+                    .upgrade()
+                    .map(|t| t.tab.borrow().url.clone())
+                    .unwrap_or_default()
+            })
+        };
+        let webview = web::new_webview(&self.context_for(tab), &settings, home.clone());
 
         // Icon with the unread bubble pinned to its top-right corner.
         let icon = gtk::Image::from_icon_name(Some("applications-internet"), gtk::IconSize::Dnd);
@@ -538,6 +565,7 @@ impl App {
             icon,
             pixbuf: RefCell::default(),
             icon_fetched: Cell::new(false),
+            icon_gen: Cell::new(0),
             badge: Cell::new(Badge::None),
             loaded: Cell::new(false),
             notification: RefCell::default(),
@@ -545,6 +573,8 @@ impl App {
         tv.update_tooltip();
         tv.update_tag();
         if let Some(p) = icons::load_cached(&tab.url) {
+            // Cached icons are reused; they're refetched only when the URL changes.
+            tv.icon_fetched.set(true);
             tv.set_icon(&p);
         }
         // Re-render crisp when the window moves to a screen with another scale.
@@ -558,13 +588,7 @@ impl App {
             }
         });
 
-        let weak_tab = Rc::downgrade(&tv);
-        let home: web::UrlFn = Rc::new(move || {
-            weak_tab
-                .upgrade()
-                .map(|t| t.tab.borrow().url.clone())
-                .unwrap_or_default()
-        });
+        *slot.borrow_mut() = Rc::downgrade(&tv);
         web::setup_routing(&webview, home, self.window.clone().upcast());
 
         let (app_w, tab_w) = (Rc::downgrade(self), Rc::downgrade(&tv));
@@ -585,9 +609,15 @@ impl App {
             if event != LoadEvent::Finished {
                 return;
             }
-            if let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade())
-                && !tv.icon_fetched.replace(true)
-            {
+            let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade()) else {
+                return;
+            };
+            // Wait until we're on the tab's own site: the first load is often a
+            // login redirect (accounts.google.com) whose icon isn't the app's.
+            let on_site = wv
+                .uri()
+                .is_some_and(|u| crate::links::same_site(&u, &tv.tab.borrow().url));
+            if on_site && !tv.icon_fetched.replace(true) {
                 app.fetch_icon(&tv, wv);
             }
         });
@@ -636,6 +666,7 @@ impl App {
             .map(|u| u.to_string())
             .unwrap_or_else(|| tv.tab.borrow().url.clone());
         let home = tv.tab.borrow().url.clone();
+        let generation = tv.icon_gen.get();
         let tab_w = Rc::downgrade(tv);
         wv.evaluate_javascript(
             favicon::COLLECT_LINKS_JS,
@@ -649,6 +680,9 @@ impl App {
                     let (Some(tv), Some(p)) = (tab_w.upgrade(), p) else {
                         return;
                     };
+                    if tv.icon_gen.get() != generation {
+                        return; // the tab's URL changed while this was downloading
+                    }
                     icons::store(&home, &p);
                     tv.set_icon(&p);
                 });
@@ -767,6 +801,7 @@ impl App {
         tv.update_tag();
         if old.url != new.url {
             tv.icon_fetched.set(false);
+            tv.icon_gen.set(tv.icon_gen.get() + 1);
         }
         let cfg = self.config.borrow();
         let ua = cfg.user_agent_for(new);
@@ -816,6 +851,12 @@ impl App {
         item("Add tab…", Box::new(|a, _| a.add_tab_dialog()));
         item("Settings…", Box::new(|a, _| settings::open(a)));
         menu.set_attach_widget(Some(&self.window));
+        // Built per right-click: destroy it once closed (after the item's
+        // activate handler has run) or every click leaks a menu.
+        menu.connect_deactivate(|m| {
+            let m = m.clone();
+            glib::idle_add_local_once(move || unsafe { m.destroy() });
+        });
         menu.show_all();
         menu
     }
@@ -854,6 +895,11 @@ impl App {
             existing: &existing,
         };
         if let Some(tab) = tab_dialog::run(cx) {
+            // The dialog runs a nested main loop: a tabs.toml reload may have
+            // removed this tab meanwhile. Then there's nothing left to edit.
+            if !self.tabs.borrow().iter().any(|t| t.id == tv.id) {
+                return;
+            }
             if tab.session != current.session {
                 // A webview can't change profiles; give the tab a fresh one.
                 self.replace_tab(tv, &tab);
@@ -872,11 +918,19 @@ impl App {
     fn replace_tab(self: &Rc<Self>, old: &Rc<TabView>, tab: &Tab) {
         let was_current = self.current.get() == old.id;
         let fresh = self.create_tab(tab);
-        {
+        let placed = {
             let mut tabs = self.tabs.borrow_mut();
-            if let Some(i) = tabs.iter().position(|t| t.id == old.id) {
-                tabs[i] = fresh.clone();
+            match tabs.iter().position(|t| t.id == old.id) {
+                Some(i) => {
+                    tabs[i] = fresh.clone();
+                    true
+                }
+                None => false,
             }
+        };
+        if !placed {
+            self.detach(&fresh); // old tab is gone; don't leave an orphan behind
+            return;
         }
         self.detach(old);
         self.sync_bar();
@@ -973,8 +1027,17 @@ impl App {
         gn.set_default_action_and_target_value("app.focus-tab", Some(&tv.id.to_variant()));
         let id = format!("tab-{}", tv.id);
         self.gapp.send_notification(Some(&id), &gn);
-        let gapp = self.gapp.clone();
-        n.connect_closed(move |_| gapp.withdraw_notification(&id));
+        // All of a tab's notifications share one desktop id, so only withdraw
+        // when the page closes the one currently shown (not an older one).
+        let (gapp, tab_w) = (self.gapp.clone(), Rc::downgrade(tv));
+        n.connect_closed(move |closed| {
+            let Some(tv) = tab_w.upgrade() else { return };
+            let latest = tv.notification.borrow().as_ref() == Some(closed);
+            if latest {
+                tv.notification.borrow_mut().take();
+                gapp.withdraw_notification(&id);
+            }
+        });
         *tv.notification.borrow_mut() = Some(n.clone());
     }
 
@@ -983,6 +1046,10 @@ impl App {
         let Some(key) = tab.session.as_deref() else {
             return self.context.clone();
         };
+        // The key is back (re-added, or a config edit in progress): keep its data.
+        if let Some(pending) = self.pending_deletes.borrow_mut().remove(key) {
+            pending.remove();
+        }
         if let Some(ctx) = self.isolated.borrow().get(key) {
             return ctx.clone();
         }
@@ -995,27 +1062,65 @@ impl App {
     }
 
     /// Deletes an isolated profile's data once no tab uses it anymore.
-    fn drop_session_if_unused(&self, key: &str) {
-        if self
-            .tabs
+    fn session_in_use(&self, key: &str) -> bool {
+        self.tabs
             .borrow()
             .iter()
             .any(|t| t.tab.borrow().session.as_deref() == Some(key))
-        {
+    }
+
+    /// Deletes an isolated profile's data once no tab uses it anymore. Cookies and
+    /// storage are cleared right away through WebKit; the folder goes a moment
+    /// later. A stale folder (app quit first) is purged at the next start.
+    fn drop_session_if_unused(self: &Rc<Self>, key: &str) {
+        if self.session_in_use(key) {
             return;
         }
-        self.isolated.borrow_mut().remove(key);
-        let (data, _) = web::session_dirs(Some(key));
-        if let Some(root) = data.parent() {
-            // Give the web/network processes a moment to let go of their files.
-            let root = root.to_path_buf();
-            glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
-                if let Err(e) = std::fs::remove_dir_all(&root)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    eprintln!("webtabs: cannot delete {}: {e}", root.display());
-                }
-            });
+        if let Some(ctx) = self.isolated.borrow_mut().remove(key)
+            && let Some(manager) = ctx.website_data_manager()
+        {
+            manager.clear(
+                webkit2gtk::WebsiteDataTypes::ALL,
+                glib::TimeSpan::from_seconds(0),
+                None::<&gio::Cancellable>,
+                |r| {
+                    if let Err(e) = r {
+                        eprintln!("webtabs: clearing session data failed: {e}");
+                    }
+                },
+            );
+        }
+        let weak = Rc::downgrade(self);
+        let key_owned = key.to_string();
+        // Give the web/network processes a moment to let go of their files.
+        let source = glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+            let Some(app) = weak.upgrade() else { return };
+            app.pending_deletes.borrow_mut().remove(&key_owned);
+            if !app.session_in_use(&key_owned) {
+                delete_session_dir(&key_owned);
+            }
+        });
+        if let Some(old) = self
+            .pending_deletes
+            .borrow_mut()
+            .insert(key.to_string(), source)
+        {
+            old.remove();
+        }
+    }
+
+    /// Removes session folders no tab refers to (e.g. the app quit right after
+    /// an isolated tab was removed).
+    fn purge_stale_sessions(&self) {
+        let root = config::data_dir().join("sessions");
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !self.session_in_use(&key) {
+                delete_session_dir(&key);
+            }
         }
     }
 
@@ -1158,6 +1263,16 @@ impl App {
         self.apply_options();
         self.load_tabs_progressively();
         self.refresh_settings();
+    }
+}
+
+fn delete_session_dir(key: &str) {
+    let (data, _) = web::session_dirs(Some(key));
+    let Some(root) = data.parent() else { return };
+    if let Err(e) = std::fs::remove_dir_all(root)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("webtabs: cannot delete {}: {e}", root.display());
     }
 }
 

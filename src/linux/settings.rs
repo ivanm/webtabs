@@ -9,6 +9,16 @@ use gtk::prelude::*;
 use std::rc::Rc;
 
 pub fn open(app: &Rc<App>) {
+    // One settings window at a time (gear, Ctrl+, and the tray can all open it).
+    let open_one = app
+        .settings_window
+        .borrow()
+        .as_ref()
+        .and_then(|w| w.upgrade());
+    if let Some(dialog) = open_one {
+        dialog.present();
+        return;
+    }
     let dialog = gtk::Dialog::with_buttons(
         Some("webtabs settings"),
         Some(&app.window),
@@ -147,8 +157,10 @@ pub fn open(app: &Rc<App>) {
         }
     });
 
+    app.settings_window.replace(Some(dialog.downgrade()));
     dialog.show_all();
     dialog.run();
+    app.settings_window.replace(None);
     app.settings_refresh.replace(None);
     app.settings_close_row.replace(None);
     dialog.close();

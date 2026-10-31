@@ -11,6 +11,9 @@ use std::path::PathBuf;
 
 /// Cached icons are stored at this size; tabs draw them at 32px (64px on HiDPI).
 const CACHE_PX: i32 = 128;
+/// Icons are tiny; anything bigger is not an icon (or is hostile).
+const MAX_ICON_BYTES: usize = 1024 * 1024;
+const MAX_ICON_SIDE: i32 = 1024;
 
 thread_local! {
     static SESSION: soup::Session = {
@@ -31,7 +34,10 @@ fn fetch_next(mut urls: std::vec::IntoIter<String>, done: Box<dyn FnOnce(Option<
         return done(None);
     };
     if let Some(data) = url.strip_prefix("data:") {
-        return match decode_data_url(data).and_then(|b| decode(&b)) {
+        return match decode_data_url(data)
+            .filter(|b| b.len() <= MAX_ICON_BYTES)
+            .and_then(|b| decode(&b))
+        {
             Some(p) => done(Some(p)),
             None => fetch_next(urls, done),
         };
@@ -47,7 +53,8 @@ fn fetch_next(mut urls: std::vec::IntoIter<String>, done: Box<dyn FnOnce(Option<
             None::<&gio::Cancellable>,
             move |res| {
                 let ok = msg2.status() == soup::Status::Ok;
-                match res.ok().filter(|_| ok).and_then(|b| decode(&b)) {
+                let body = res.ok().filter(|b| ok && b.len() <= MAX_ICON_BYTES);
+                match body.and_then(|b| decode(&b)) {
                     Some(p) => done(Some(p)),
                     None => fetch_next(urls, done),
                 }
@@ -74,13 +81,22 @@ fn decode_data_url(data: &str) -> Option<Vec<u8>> {
 pub fn decode(bytes: &[u8]) -> Option<Pixbuf> {
     let loader = PixbufLoader::new();
     loader.connect_size_prepared(|l, w, h| {
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let is_svg = l
             .format()
             .and_then(|f| f.name())
             .is_some_and(|n| n.contains("svg"));
-        if is_svg && w > 0 && h > 0 && w.max(h) < CACHE_PX {
-            let k = CACHE_PX as f64 / w.max(h) as f64;
-            l.set_size((w as f64 * k) as i32, (h as f64 * k) as i32);
+        let side = w.max(h);
+        // SVGs render at cache size (sharp); huge declared sizes are scaled
+        // down before decoding so a hostile image can't allocate gigabytes.
+        if (is_svg && side < CACHE_PX) || side > MAX_ICON_SIDE {
+            let k = CACHE_PX as f64 / side as f64;
+            l.set_size(
+                ((w as f64 * k) as i32).max(1),
+                ((h as f64 * k) as i32).max(1),
+            );
         }
     });
     loader.write(bytes).ok()?;

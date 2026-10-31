@@ -5,11 +5,14 @@ use crate::config::{cache_dir, data_dir};
 use crate::links::{self, Target};
 use gtk::prelude::*;
 use gtk::{gio, glib};
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use webkit2gtk::{
     CookieManagerExt, NavigationPolicyDecisionExt, PermissionRequestExt, PolicyDecisionExt,
-    SettingsExt, URIRequestExt, WebContextExt, WebViewExt, WebsiteDataManagerExt,
+    SettingsExt, URIRequestExt, WebContextExt, WebViewExt, WebsiteDataAccessPermissionRequestExt,
+    WebsiteDataManagerExt,
 };
 use webkit2gtk::{
     CookiePersistentStorage, DeviceInfoPermissionRequest, MediaKeySystemPermissionRequest,
@@ -18,14 +21,6 @@ use webkit2gtk::{
     PolicyDecisionType, Settings, UserMediaPermissionRequest, WebContext,
     WebProcessTerminationReason, WebView, WebsiteDataAccessPermissionRequest, WebsiteDataManager,
 };
-
-unsafe extern "C" {
-    // WebKitGTK >= 2.40; not exposed by webkit2gtk-sys yet.
-    fn webkit_website_data_manager_set_favicons_enabled(
-        manager: *mut webkit2gtk::ffi::WebKitWebsiteDataManager,
-        enabled: glib::ffi::gboolean,
-    );
-}
 
 /// Storage for a session: `None` is the shared profile every normal tab uses
 /// (so SSO works across tabs); `Some(key)` is an isolated tab's private one.
@@ -47,9 +42,6 @@ pub fn new_context(session: Option<&str>) -> WebContext {
         .base_data_directory(data.to_string_lossy().as_ref())
         .base_cache_directory(cache.to_string_lossy().as_ref())
         .build();
-    unsafe {
-        webkit_website_data_manager_set_favicons_enabled(manager.as_ptr(), glib::ffi::GTRUE);
-    }
     if let Some(cookies) = manager.cookie_manager() {
         cookies.set_persistent_storage(
             &data.join("cookies.sqlite").to_string_lossy(),
@@ -76,14 +68,16 @@ pub fn new_context(session: Option<&str>) -> WebContext {
     ctx
 }
 
-/// Makes each web process shed caches and run GC early instead of growing to the
-/// default ~1 GB before reacting. No kill threshold: a tab is never terminated.
+/// Lets a web process that keeps growing shed caches and GC before it gets huge.
+/// Thresholds sit above a logged-in WhatsApp (~600-700 MiB) so normal tabs are
+/// never in a pressure band (where WebKit would run full GCs every poll).
+/// No kill threshold: a tab is never terminated.
 fn memory_pressure() -> MemoryPressureSettings {
     let mut mp = MemoryPressureSettings::new();
-    mp.set_memory_limit(1536); // MiB per web process
-    mp.set_conservative_threshold(0.25); // start trimming at ~384 MiB
-    mp.set_strict_threshold(0.5); // aggressive at ~768 MiB
-    mp.set_poll_interval(5.0);
+    mp.set_memory_limit(3072); // MiB per web process
+    mp.set_conservative_threshold(0.33); // start trimming at ~1 GiB
+    mp.set_strict_threshold(0.5); // aggressive at ~1.5 GiB
+    mp.set_poll_interval(30.0);
     mp
 }
 
@@ -96,8 +90,10 @@ pub fn new_settings(user_agent: &str) -> Settings {
     s.set_enable_mediasource(true);
     s.set_enable_encrypted_media(true);
     s.set_enable_smooth_scrolling(true);
+    // Needed for OAuth/Meet popups; external opens still require a user gesture.
+    // (No javascript_can_access_clipboard: it lets any page read the clipboard
+    // without a click. User-initiated copy/paste works without it.)
     s.set_javascript_can_open_windows_automatically(true);
-    s.set_javascript_can_access_clipboard(true);
     s.set_media_playback_requires_user_gesture(false);
     // Back/forward page cache keeps whole pages alive; single-page apps don't need it.
     s.set_enable_page_cache(false);
@@ -106,53 +102,82 @@ pub fn new_settings(user_agent: &str) -> Settings {
     s
 }
 
-pub fn new_webview(ctx: &WebContext, settings: &Settings) -> WebView {
+/// Home URL of the tab that owns a webview (or popup), read live so edits apply.
+pub type UrlFn = Rc<dyn Fn() -> String>;
+
+/// Crash-reload guard: more crashes than this within the window stops reloading.
+const MAX_CRASHES: usize = 3;
+const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+pub fn new_webview(ctx: &WebContext, settings: &Settings, home: UrlFn) -> WebView {
     let wv = WebView::builder()
         .web_context(ctx)
         .settings(settings)
         .build();
-    setup_common(&wv);
+    setup_common(&wv, home);
     wv
 }
 
 /// Behaviour shared by tab webviews and popups.
-fn setup_common(wv: &WebView) {
-    wv.connect_permission_request(|_, req| {
-        allow_or_deny(req);
+fn setup_common(wv: &WebView, home: UrlFn) {
+    wv.connect_permission_request(move |wv, req| {
+        allow_or_deny(wv, req, &home());
         true
     });
-    wv.connect_web_process_terminated(|wv, reason| {
-        if reason != WebProcessTerminationReason::TerminatedByApi {
+    let crashes: Rc<RefCell<Vec<Instant>>> = Rc::default();
+    wv.connect_web_process_terminated(move |wv, reason| {
+        if reason == WebProcessTerminationReason::TerminatedByApi {
+            return;
+        }
+        let mut recent = crashes.borrow_mut();
+        recent.retain(|t| t.elapsed() < CRASH_WINDOW);
+        recent.push(Instant::now());
+        if recent.len() > MAX_CRASHES {
             eprintln!(
-                "webtabs: web process for {:?} died ({reason:?}), reloading",
+                "webtabs: {:?} keeps crashing ({reason:?}); not reloading",
                 wv.uri()
             );
-            wv.reload();
+            return;
         }
+        eprintln!(
+            "webtabs: web process for {:?} died ({reason:?}), reloading",
+            wv.uri()
+        );
+        wv.reload();
     });
 }
 
-/// These are the user's own apps: grant what chat/meeting apps need,
-/// keep location and everything unknown denied.
-fn allow_or_deny(req: &PermissionRequest) {
-    let allowed = req.is::<NotificationPermissionRequest>()
+/// These are the user's own apps: grant what chat/meeting apps need, but only
+/// to the tab's own site (a page reached through a redirect gets nothing).
+/// Location and anything unknown are always denied.
+fn allow_or_deny(wv: &WebView, req: &PermissionRequest, home: &str) {
+    let page = wv.uri().map(|u| u.to_string()).unwrap_or_default();
+    let own_site = links::same_site(&page, home);
+    let allowed = if let Some(r) = req.downcast_ref::<WebsiteDataAccessPermissionRequest>() {
+        // Storage access for an embedded (third-party) frame on the tab's site.
+        r.current_domain()
+            .is_some_and(|d| links::same_site(&format!("https://{d}/"), home))
+    } else if req.is::<NotificationPermissionRequest>()
         || req.is::<UserMediaPermissionRequest>()
         || req.is::<DeviceInfoPermissionRequest>()
-        || req.is::<MediaKeySystemPermissionRequest>()
-        || req.is::<PointerLockPermissionRequest>()
-        || req.is::<WebsiteDataAccessPermissionRequest>();
+    {
+        own_site
+    } else {
+        req.is::<MediaKeySystemPermissionRequest>() || req.is::<PointerLockPermissionRequest>()
+    };
     if allowed { req.allow() } else { req.deny() }
 }
 
+/// Hands a link to the desktop's default handler (http/https/mailto/tel only).
 pub fn open_external(uri: &str) {
+    if !links::is_safe_external(uri) {
+        eprintln!("webtabs: refusing to open {uri}");
+        return;
+    }
     if let Err(e) = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>) {
         eprintln!("webtabs: cannot open {uri}: {e}");
     }
 }
-
-/// Routes link clicks and new windows. `tab_url` is the home URL of the owning
-/// tab, used to decide what counts as "the same app".
-pub type UrlFn = Rc<dyn Fn() -> String>;
 
 pub fn setup_routing(wv: &WebView, tab_url: UrlFn, parent: gtk::Window) {
     let url_fn = tab_url.clone();
@@ -180,28 +205,37 @@ pub fn setup_routing(wv: &WebView, tab_url: UrlFn, parent: gtk::Window) {
             _ => false,
         };
         if external {
-            open_external(&uri);
+            // A page can't push things out of the app on its own (popup spam,
+            // custom-scheme launches): only a real click opens the browser.
+            if action.is_user_gesture() {
+                open_external(&uri);
+            }
             decision.ignore();
         }
         external
     });
 
     let url_fn = tab_url.clone();
-    wv.connect_create(move |wv, _action| {
+    wv.connect_create(move |wv, action| {
         let popup = WebView::with_related_view(wv);
         if let Some(s) = WebViewExt::settings(wv) {
             popup.set_settings(&s);
         }
-        setup_common(&popup);
-        setup_popup(&popup, url_fn.clone(), parent.clone());
+        setup_common(&popup, url_fn.clone());
+        setup_popup(
+            &popup,
+            url_fn.clone(),
+            parent.clone(),
+            action.is_user_gesture(),
+        );
         Some(popup.upcast())
     });
 }
 
 /// A popup is a small window for OAuth flows, Meet calls, "open in new window" etc.
 /// If its first real navigation turns out to be an external link, hand it to the
-/// system browser and drop the popup before it is ever shown.
-fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window) {
+/// system browser (only if a click opened it) and drop the popup unshown.
+fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window, by_user: bool) {
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_transient_for(Some(&parent));
     window.set_default_size(1000, 760);
@@ -228,7 +262,9 @@ fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window) {
             return false;
         };
         if fresh && links::route(&url_fn(), &uri) == Target::External {
-            open_external(&uri);
+            if by_user {
+                open_external(&uri);
+            }
             decision.ignore();
             let win = win.clone();
             glib::idle_add_local_once(move || win.close());
@@ -237,8 +273,34 @@ fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window) {
         false
     });
 
-    let win = window.clone();
-    popup.connect_ready_to_show(move |_| win.show_all());
+    // Show only once real content commits: a popup whose load WebKit blocks
+    // (e.g. file://) never appears, and is dropped after a grace period.
+    let ready = Rc::new(Cell::new(false));
+    let (win, r) = (window.clone(), ready.clone());
+    popup.connect_ready_to_show(move |p| {
+        r.set(true);
+        if p.uri().is_some_and(|u| u.starts_with("http")) {
+            win.show_all();
+        }
+    });
+    let (win, r) = (window.clone(), ready.clone());
+    popup.connect_load_changed(move |p, event| {
+        if event == webkit2gtk::LoadEvent::Committed
+            && r.get()
+            && !win.is_visible()
+            && p.uri().is_some_and(|u| u.starts_with("http"))
+        {
+            win.show_all();
+        }
+    });
+    let win = window.downgrade();
+    glib::timeout_add_local_once(Duration::from_secs(15), move || {
+        if let Some(win) = win.upgrade()
+            && !win.is_visible()
+        {
+            win.close();
+        }
+    });
     let win = window.clone();
     popup.connect_close(move |_| win.close());
     let win = window.clone();
