@@ -125,16 +125,40 @@ pub fn create_controller(
     }
 }
 
+thread_local! {
+    /// WebView2's own (Edge) user agent, read from the first webview before any
+    /// override, so removing an override can put it back without a restart.
+    static ENGINE_UA: std::cell::OnceCell<String> = const { std::cell::OnceCell::new() };
+}
+
+fn engine_ua(s2: &ICoreWebView2Settings2) -> Option<String> {
+    ENGINE_UA.with(|cell| {
+        if cell.get().is_none() {
+            let mut cur = PWSTR::null();
+            unsafe {
+                let _ = s2.UserAgent(&mut cur);
+            }
+            let cur = take_pwstr(cur);
+            if !cur.is_empty() {
+                let _ = cell.set(cur);
+            }
+        }
+        cell.get().cloned()
+    })
+}
+
 pub fn configure(wv: &ICoreWebView2, user_agent: Option<&str>) {
     unsafe {
         if let Ok(s) = wv.Settings() {
             let _ = s.SetAreDevToolsEnabled(true);
             let _ = s.SetIsStatusBarEnabled(false);
             let _ = s.SetAreDefaultScriptDialogsEnabled(true);
-            if let Some(ua) = user_agent
-                && let Ok(s2) = s.cast::<ICoreWebView2Settings2>()
-            {
-                let _ = s2.SetUserAgent(&HSTRING::from(ua));
+            if let Ok(s2) = s.cast::<ICoreWebView2Settings2>() {
+                // Capture the engine default before the first override hides it.
+                let _ = engine_ua(&s2);
+                if let Some(ua) = user_agent {
+                    let _ = s2.SetUserAgent(&HSTRING::from(ua));
+                }
             }
         }
     }
@@ -151,12 +175,11 @@ pub fn set_user_agent(wv: &ICoreWebView2, user_agent: Option<&str>) -> bool {
         let mut cur = PWSTR::null();
         let _ = s2.UserAgent(&mut cur);
         let cur = take_pwstr(cur);
-        match user_agent {
-            Some(ua) if ua != cur => s2.SetUserAgent(&HSTRING::from(ua)).is_ok(),
-            // Back to the engine default: WebView2 has no "reset", so this needs a
-            // fresh controller; report "unchanged" and let the next start pick it up.
-            _ => false,
-        }
+        // No override means WebView2's own user agent (WebView2 has no "reset").
+        let Some(want) = user_agent.map(String::from).or_else(|| engine_ua(&s2)) else {
+            return false;
+        };
+        want != cur && s2.SetUserAgent(&HSTRING::from(want.as_str())).is_ok()
     }
 }
 
