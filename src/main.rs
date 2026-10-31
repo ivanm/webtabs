@@ -1,16 +1,22 @@
+// Release builds are GUI apps on Windows: no console window behind them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+// XDG autostart: Linux only for now (Windows' mechanism is an open decision).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod autostart;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod badge;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod config;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod favicon;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod links;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod presets;
 
 #[cfg(target_os = "linux")]
@@ -36,7 +42,12 @@ fn main() {
     std::process::exit(1);
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn main() -> std::process::ExitCode {
+    windows::run()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn main() {
     eprintln!("webtabs: this platform's backend is not implemented yet (macOS is next)");
     std::process::exit(1);

@@ -386,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_keeps_symlinks() {
         let dir = std::env::temp_dir().join(format!("webtabs-link-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
