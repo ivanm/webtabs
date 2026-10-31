@@ -24,6 +24,26 @@ fn dispatch(request: Value) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?;
             Ok(json!(cfg))
         }
+        "parse" => Ok(json!(config::Config::parse(text("text"))?)),
+        "config_path" => Ok(json!(config::config_path())),
+        // A tab from the add/edit form, normalized exactly like Linux's dialog.
+        "make_tab" => {
+            let tab = config::Tab::new(text("name"), text("url"), request["user_agent"].as_str())
+                .with_label(text("label"));
+            Ok(json!({"valid": tab.is_valid(), "tab": tab}))
+        }
+        "user_agents" => Ok(json!({
+            "default": config::DEFAULT_USER_AGENT,
+            "presets": config::USER_AGENT_PRESETS,
+        })),
+        // Registrable site of a URL as typed in the form (null if it has no host).
+        "site" => Ok(json!(
+            url::Url::parse(&config::normalize_url(text("url")))
+                .ok()
+                .and_then(|u| u.host_str().map(links::site))
+        )),
+        "same_site" => Ok(json!(links::same_site(text("a"), text("b")))),
+        "safe_external" => Ok(json!(links::is_safe_external(text("url")))),
         "route" => Ok(json!(
             links::route(text("home"), text("url")) == links::Target::InApp
         )),
@@ -46,6 +66,7 @@ fn dispatch(request: Value) -> Result<Value, String> {
         }
         "favicon_script" => Ok(json!(favicon::COLLECT_LINKS_JS)),
         "favicons" => Ok(json!(favicon::candidates(text("url"), text("links")))),
+        "icon_cache" => Ok(json!(favicon::cache_path(text("url")))),
         "user_agent" => {
             let cfg: config::Config =
                 serde_json::from_value(request["config"].clone()).map_err(|e| e.to_string())?;
@@ -111,5 +132,28 @@ mod tests {
                 webtabs_free(output);
             }
         }
+    }
+
+    #[test]
+    fn form_helpers_match_the_linux_dialog() {
+        let made = dispatch(
+            json!({"op": "make_tab", "name": " ", "url": "web.whatsapp.com",
+                                   "label": " Work ", "user_agent": null}),
+        )
+        .unwrap();
+        assert_eq!(made["valid"], true);
+        assert_eq!(made["tab"]["url"], "https://web.whatsapp.com");
+        assert_eq!(made["tab"]["name"], "web.whatsapp.com");
+        assert_eq!(made["tab"]["label"], "Wo");
+        let bad = dispatch(json!({"op": "make_tab", "name": "x", "url": "https://"})).unwrap();
+        assert_eq!(bad["valid"], false);
+        let site = |u: &str| dispatch(json!({"op": "site", "url": u})).unwrap();
+        assert_eq!(site("mail.google.com/mail"), "google.com");
+        assert_eq!(site(""), Value::Null);
+        let safe = |u: &str| dispatch(json!({"op": "safe_external", "url": u})).unwrap();
+        assert_eq!(
+            (safe("mailto:a@b.c"), safe("zoommtg://x")),
+            (json!(true), json!(false))
+        );
     }
 }

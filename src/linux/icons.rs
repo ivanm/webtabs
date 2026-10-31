@@ -1,13 +1,13 @@
 //! Site icons: download the best declared icon, cache it on disk, and render it
 //! crisp at any HiDPI scale.
 
-use crate::config::{DEFAULT_USER_AGENT, data_dir};
+use crate::config::DEFAULT_USER_AGENT;
+use crate::favicon::cache_path;
 use gtk::gdk::prelude::GdkPixbufExt;
 use gtk::gdk_pixbuf::{InterpType, Pixbuf, PixbufLoader};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use soup::prelude::*;
-use std::path::PathBuf;
 
 /// Cached icons are stored at this size; tabs draw them at 32px (64px on HiDPI).
 const CACHE_PX: i32 = 128;
@@ -125,26 +125,6 @@ pub fn show(image: &gtk::Image, p: &Pixbuf, px: i32) {
         let surface = fitted.create_surface(scale, image.window().as_ref());
         image.set_from_surface(surface.as_ref());
     }
-}
-
-/// One file per tab URL (two tabs on the same host can have different icons).
-fn cache_path(page_url: &str) -> Option<PathBuf> {
-    let u = url::Url::parse(page_url).ok()?;
-    let key: String = format!("{}{}", u.host_str()?, u.path())
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    Some(
-        data_dir()
-            .join("favicons")
-            .join(format!("{}.png", key.trim_end_matches('_'))),
-    )
 }
 
 pub fn load_cached(page_url: &str) -> Option<Pixbuf> {

@@ -9,14 +9,33 @@ fi
 export MACOSX_DEPLOYMENT_TARGET=14.0
 cargo build --release --locked
 APP="$PWD/target/release/WebTabs.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" target/swift-cache
+# Build into a staging bundle and swap it in only once it is complete and signed.
+STAGE="$PWD/target/release/WebTabs.app.staging"
+rm -rf "$STAGE"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources" target/swift-cache
 xcrun swiftc -swift-version 5 -O -module-cache-path "$PWD/target/swift-cache" \
-    -target "$(uname -m)-apple-macosx14.0" macos/main.swift \
+    -target "$(uname -m)-apple-macosx14.0" macos/*.swift \
     target/release/libwebtabs_core.a -framework AppKit -framework WebKit \
     -framework UserNotifications -framework ServiceManagement -framework Security \
-    -liconv -o "$APP/Contents/MacOS/WebTabs"
-xcrun swift -module-cache-path "$PWD/target/swift-cache" macos/icon.swift "$PWD/target/WebTabs.iconset"
-iconutil -c icns target/WebTabs.iconset -o "$APP/Contents/Resources/WebTabs.icns"
-cp macos/Info.plist "$APP/Contents/Info.plist"
-codesign --force --sign - "$APP"
+    -liconv -o "$STAGE/Contents/MacOS/WebTabs"
+xcrun swift -module-cache-path "$PWD/target/swift-cache" scripts/macos-icon.swift "$PWD/target/WebTabs.iconset"
+iconutil -c icns target/WebTabs.iconset -o "$STAGE/Contents/Resources/WebTabs.icns"
+cp macos/Info.plist "$STAGE/Contents/Info.plist"
+# A stable identity keeps the app's identity across rebuilds, so the Keychain
+# "Always Allow" for WebKit's WebCrypto master key sticks. Ad-hoc signatures
+# change with every build and macOS asks again each time.
+IDENTITY="${WEBTABS_SIGN_IDENTITY:-$(security find-identity -p codesigning 2>/dev/null |
+    awk -F'"' '/"(Apple Development|WebTabs Local Signing)/ { print $2; exit }')}"
+if ! codesign --force --sign "${IDENTITY:--}" "$STAGE"; then
+    echo "codesign failed. On errSecInternalComponent, let codesign use the key (asks for your login password):" >&2
+    echo "  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -l '$IDENTITY' ~/Library/Keychains/login.keychain-db" >&2
+    echo "Or build ad-hoc signed: WEBTABS_SIGN_IDENTITY=- make build" >&2
+    exit 1
+fi
+if [[ -z "$IDENTITY" || "$IDENTITY" == "-" ]]; then
+    echo 'note: ad-hoc signed; Keychain will ask again after every rebuild.' >&2
+    echo '      Run scripts/macos-signing-identity.sh once to sign with a stable local identity.' >&2
+fi
+rm -rf "$APP"
+mv "$STAGE" "$APP"
 printf 'Built %s\n' "$APP"

@@ -1,7 +1,9 @@
 //! Picks the best icon for a tab from the `<link>` tags a page declares.
 //! Platform front ends collect the links (via JS) and download the winner.
 
+use crate::config::data_dir;
 use serde::Deserialize;
+use std::path::PathBuf;
 use url::Url;
 
 /// Runs in the page; returns a JSON array of the declared icons.
@@ -44,6 +46,27 @@ pub fn candidates(page_url: &str, links_json: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where a tab's downloaded icon is cached: one file per tab URL (two tabs on the
+/// same host can have different icons).
+pub fn cache_path(page_url: &str) -> Option<PathBuf> {
+    let u = Url::parse(page_url).ok()?;
+    let key: String = format!("{}{}", u.host_str()?, u.path())
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(
+        data_dir()
+            .join("favicons")
+            .join(format!("{}.png", key.trim_end_matches('_'))),
+    )
 }
 
 fn score(l: &Link) -> u32 {
@@ -106,5 +129,19 @@ mod tests {
             vec!["https://a.b/favicon.ico"]
         );
         assert!(candidates("not a url", "[]").is_empty());
+    }
+
+    #[test]
+    fn cache_file_per_tab_url() {
+        let name = |u: &str| cache_path(u).map(|p| p.file_name().unwrap().to_owned());
+        assert_eq!(
+            name("https://web.whatsapp.com"),
+            name("https://web.whatsapp.com/")
+        );
+        assert_eq!(
+            name("https://mail.google.com/mail/u/1/"),
+            Some("mail.google.com_mail_u_1.png".into())
+        );
+        assert_eq!(name("not a url"), None);
     }
 }

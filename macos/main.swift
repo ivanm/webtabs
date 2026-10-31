@@ -1,26 +1,55 @@
+// macOS front end: an AppKit window with the Linux icon tab bar, one WKWebView
+// per tab, a menu bar icon, notifications, settings and a hot-reloaded config
+// file. Behaviour follows src/linux/mod.rs; rules come from the Rust core.
+
 import AppKit
 import CryptoKit
-import ServiceManagement
 import UserNotifications
 import WebKit
 
-@_silgen_name("webtabs_request") func coreRequest(_ request: UnsafePointer<CChar>)
-  -> UnsafeMutablePointer<CChar>
-@_silgen_name("webtabs_free") func coreFree(_ response: UnsafeMutablePointer<CChar>)
+/// One tab: its config entry, web view and bar button (Linux `TabView`).
+final class TabView {
+  let id: Int
+  var tab: Tab
+  let web: WKWebView
+  let button = TabButton()
+  var icon: NSImage?
+  var iconFetched = false
+  /// Bumped when the tab's URL changes, so a slow fetch for the old URL is ignored.
+  var iconGeneration = 0
+  var badge = Badge()
+  var loaded = false
+  /// The page's id for the notification currently shown for this tab.
+  var notificationID: String?
+  var crashes: [Date] = []
+  var titleObservation: NSKeyValueObservation?
 
-func core(_ request: [String: Any]) throws -> Any {
-  let data = try JSONSerialization.data(withJSONObject: request)
-  let pointer = String(decoding: data, as: UTF8.self).withCString { coreRequest($0) }
-  defer { coreFree(pointer) }
-  let result =
-    try JSONSerialization.jsonObject(with: Data(String(cString: pointer).utf8)) as! [String: Any]
-  guard result["ok"] as? Bool == true else {
-    throw NSError(
-      domain: "WebTabs", code: 1,
-      userInfo: [NSLocalizedDescriptionKey: result["error"] as? String ?? "Core error"])
+  init(id: Int, tab: Tab, web: WKWebView) {
+    (self.id, self.tab, self.web) = (id, tab, web)
+    setIcon(nil)
+    updateTooltip()
+    updateTag()
   }
-  return result["result"] as Any
+
+  func setIcon(_ image: NSImage?) {
+    icon = image
+    button.icon.image = image ?? Icons.placeholder
+    button.icon.contentTintColor = image == nil ? .secondaryLabelColor : nil
+  }
+
+  func updateTag() { button.tagPill.text = tab.label ?? "" }
+
+  func updateTooltip() {
+    let unread =
+      badge.count > 0 ? " — \(badge.count) unread" : badge.unread ? " — new activity" : ""
+    button.toolTip = tab.name + unread
+    button.setAccessibilityLabel(tab.name + unread)
+  }
+
+  var notificationKey: String { "tab-\(id)" }
 }
+
+/// Stable WebKit profile id for a profile name.
 func profileID(_ key: String) -> UUID {
   var bytes = Array(SHA256.hash(data: Data(key.utf8)).prefix(16))
   bytes[6] = (bytes[6] & 15) | 80
@@ -31,822 +60,1058 @@ func profileID(_ key: String) -> UUID {
       bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
     ))
 }
-final class TabState {
-  var spec: [String: Any]
-  let web: WKWebView
-  var observation: NSKeyValueObservation?
-  var badge = ""
-  var count = 0
-  var unread = false
-  var icon: NSImage?
-  init(_ spec: [String: Any], _ web: WKWebView) {
-    self.spec = spec
-    self.web = web
-  }
-  var name: String { spec["name"] as? String ?? "Tab" }
-  var home: String { spec["url"] as? String ?? "" }
-  var identity: String { home + "\n" + (spec["session"] as? String ?? "") }
-}
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate,
-  WKUIDelegate, WKScriptMessageHandlerWithReply, UNUserNotificationCenterDelegate,
-  WKDownloadDelegate
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate,
+  NSMenuItemValidation, UNUserNotificationCenterDelegate, WKScriptMessageHandlerWithReply
 {
   var window: NSWindow!
-  var bar = NSStackView()
-  var content = NSView()
-  var config: [String: Any] = [:]
-  var tabs: [TabState] = []
-  var selected = 0
-  var status: NSStatusItem?
-  var timer: Timer?
+  /// Tab buttons, in tab order; the "+" sits right after it.
+  let tabStack = NSStackView()
+  let strip = TabStrip()
+  /// Holds one web view per tab plus the empty state.
+  let content = NSView()
+  var emptyState: NSView!
+  var config = Config()
   var configPath = ""
-  var configText = ""
-  var popups: [NSWindow] = []
-  var popupHomes: [ObjectIdentifier: String] = [:]
-  var smoke = CommandLine.arguments.contains("--smoke-test")
-  var smokeComplete = false
-  var downloads: [WKDownload] = []
-  func enabled(_ key: String) -> Bool { config[key] as? Bool ?? true }
-  var current: TabState? { tabs.indices.contains(selected) ? tabs[selected] : nil }
+  var dataDir = ""
+  var lastSaved = ""
+  var lastRejected = ""
+  var tabs: [TabView] = []
+  var currentID = 0
+  var nextID = 1
+  var lastUnread = 0
+  var status: NSStatusItem?
+  let statusDot = NSView()
+  var settingsWindow: SettingsWindow?
+  /// Isolated tabs' private profiles, by session key.
+  var isolated: [String: WKWebsiteDataStore] = [:]
+  /// Isolated-session data scheduled for deletion; cancelled if the key returns.
+  var pendingDeletes: [String: DispatchWorkItem] = [:]
+  var popups: [ObjectIdentifier: Popup] = [:]
+  var downloads: [ObjectIdentifier: URL] = [:]
+  var loadTimer: Timer?
+  var watchTimer: Timer?
+  let smoke = CommandLine.arguments.contains("--smoke-test")
+  var smokeDone = false
+
+  var current: TabView? { tabs.first { $0.id == currentID } }
+
+  /// `WEBTABS_DATA` picks a separate set of WebKit profiles (tests, second setups).
+  private let namespace = ProcessInfo.processInfo.environment["WEBTABS_DATA"] ?? "default"
+  /// Shared profile used by every non-isolated tab.
+  lazy var sharedStore = WKWebsiteDataStore(forIdentifier: profileID(namespace + ":shared"))
+
+  // ---- startup ----------------------------------------------------------------
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
     makeMenu()
+    UNUserNotificationCenter.current().delegate = self
+    let loaded: Loaded
+    do {
+      loaded = try Core.call("load")
+    } catch {
+      return startupFailed(error)
+    }
+    (config, configPath, dataDir) = (loaded.config, loaded.path, loaded.data)
+    lastSaved = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+    buildWindow()
+    tabs = config.tabs.map(createTab)
+    purgeStaleSessions()
+    updateEmptyState()
+    applyOptions()
+    loadTabsProgressively()
+    watchConfig()
+    if config.notifications && !smoke { requestNotifications() }
+    let hidden = CommandLine.arguments.contains("--hidden") || launchedAsLoginItem()
+    if !(hidden && status != nil) { showWindow() }
+    if smoke {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 40) {
+        if !self.smokeDone { self.smokeFail("WebKit timed out") }
+      }
+    }
+  }
+
+  /// A broken tabs.toml: don't run (saving from the UI would overwrite it).
+  private func startupFailed(_ error: Error) {
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "WebTabs can’t read tabs.toml"
+    alert.informativeText = "\(error.localizedDescription)\n\nFix the file and open WebTabs again."
+    alert.addButton(withTitle: "Quit")
+    alert.addButton(withTitle: "Open tabs.toml")
+    if alert.runModal() == .alertSecondButtonReturn,
+      let path: String = try? Core.call("config_path")
+    {
+      openConfigFile(path)
+    }
+    NSApp.terminate(nil)
+  }
+
+  private func launchedAsLoginItem() -> Bool {
+    guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+    return event.eventID == AEEventID(kAEOpenApplication)
+      && event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue
+        == OSType(keyAELaunchedAsLogInItem)
+  }
+
+  // ---- window & chrome ----------------------------------------------------------
+
+  private func buildWindow() {
     window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
-    )
+      contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
+      defer: false)
     window.title = "WebTabs"
     window.minSize = NSSize(width: 540, height: 400)
     window.delegate = self
     window.isReleasedWhenClosed = false
+    window.tabbingMode = .disallowed
+    if !window.setFrameUsingName("WebTabsMain") { window.center() }
     window.setFrameAutosaveName("WebTabsMain")
-    window.center()
-    let root = window.contentView!
-    let strip = NSScrollView()
-    strip.hasHorizontalScroller = true
+
+    // [tab][tab][tab][+] ............................ [gear]
+    let bar = NSView()
+    let add = SymbolTile("plus", label: "Add tab", tooltip: "Add tab (⌘T)")
+    add.onClick = { [weak self] in self?.addTabDialog() }
+    let gear = SymbolTile("gearshape", label: "Settings", tooltip: "Settings (⌘,)")
+    gear.onClick = { [weak self] in self?.openSettings() }
+    tabStack.orientation = .horizontal
+    tabStack.spacing = 2
+    tabStack.translatesAutoresizingMaskIntoConstraints = false
+    tabStack.setAccessibilityElement(true)
+    tabStack.setAccessibilityRole(.tabGroup)
+    tabStack.setAccessibilityLabel("Tabs")
+    strip.documentView = tabStack
     strip.drawsBackground = false
-    bar.orientation = .horizontal
-    bar.spacing = 6
-    bar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-    strip.documentView = bar
-    for view in [strip, content] {
+    strip.hasHorizontalScroller = false
+    strip.verticalScrollElasticity = .none
+    let line = NSBox()
+    line.boxType = .separator
+    emptyState = makeEmptyState()
+
+    let root = window.contentView!
+    for view in [bar, line, content] as [NSView] {
       view.translatesAutoresizingMaskIntoConstraints = false
       root.addSubview(view)
     }
-    bar.translatesAutoresizingMaskIntoConstraints = false
+    for view in [strip, add, gear] as [NSView] {
+      view.translatesAutoresizingMaskIntoConstraints = false
+      bar.addSubview(view)
+    }
+    emptyState.translatesAutoresizingMaskIntoConstraints = false
+    content.addSubview(emptyState)
+    let stripWidth = strip.widthAnchor.constraint(equalTo: tabStack.widthAnchor)
+    stripWidth.priority = .defaultHigh  // shrinks (and scrolls) when tabs overflow
     NSLayoutConstraint.activate([
-      strip.topAnchor.constraint(equalTo: root.topAnchor),
-      strip.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-      strip.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-      strip.heightAnchor.constraint(equalToConstant: 48),
-      bar.leadingAnchor.constraint(equalTo: strip.contentView.leadingAnchor),
-      bar.topAnchor.constraint(equalTo: strip.contentView.topAnchor),
-      bar.heightAnchor.constraint(equalToConstant: 38),
-      content.topAnchor.constraint(equalTo: strip.bottomAnchor),
+      bar.topAnchor.constraint(equalTo: root.topAnchor),
+      bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      bar.heightAnchor.constraint(equalToConstant: 52),
+      line.topAnchor.constraint(equalTo: bar.bottomAnchor),
+      line.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      line.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      content.topAnchor.constraint(equalTo: line.bottomAnchor),
       content.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
       content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+      strip.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 6),
+      strip.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+      strip.heightAnchor.constraint(equalToConstant: 44),
+      stripWidth,
+      tabStack.leadingAnchor.constraint(equalTo: strip.contentView.leadingAnchor),
+      tabStack.topAnchor.constraint(equalTo: strip.contentView.topAnchor),
+      tabStack.bottomAnchor.constraint(equalTo: strip.contentView.bottomAnchor),
+      add.leadingAnchor.constraint(equalTo: strip.trailingAnchor, constant: 4),
+      add.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+      add.trailingAnchor.constraint(lessThanOrEqualTo: gear.leadingAnchor, constant: -8),
+      gear.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -6),
+      gear.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+      emptyState.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+      emptyState.centerYAnchor.constraint(equalTo: content.centerYAnchor),
     ])
-    UNUserNotificationCenter.current().delegate = self
-    do { try load() } catch { showError(error) }
-    if !CommandLine.arguments.contains("--hidden") || !enabled("tray") { showWindow() }
-    timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-      guard let self, let text = try? String(contentsOfFile: self.configPath, encoding: .utf8),
-        text != self.configText
-      else { return }
-      self.configText = text
-      do { try self.load() } catch { self.showError(error) }
-    }
-    if smoke {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
-        if !self.smokeComplete {
-          fputs("SMOKE FAIL: WebKit timed out\n", stderr)
-          exit(1)
-        }
-      }
-    }
   }
-  func load() throws {
-    let value = try core(["op": "load"]) as! [String: Any]
-    configPath = value["path"] as! String
-    configText = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
-    apply(value["config"] as! [String: Any])
+
+  private func makeEmptyState() -> NSView {
+    let title = NSTextField(labelWithString: "No tabs yet")
+    title.font = .systemFont(ofSize: 18, weight: .bold)
+    let hint = NSTextField(labelWithString: "Press ⌘T, or open settings with the gear")
+    hint.textColor = .secondaryLabelColor
+    let button = NSButton(title: "Add a tab", target: self, action: #selector(addTab))
+    let stack = NSStackView(views: [title, hint, button])
+    stack.orientation = .vertical
+    stack.spacing = 12
+    stack.isHidden = true
+    return stack
   }
-  func save(_ candidate: [String: Any]) {
-    do {
-      let saved = try core(["op": "save", "config": candidate]) as! [String: Any]
-      configText = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
-      apply(saved)
-    } catch { showError(error) }
-  }
-  func apply(_ cfg: [String: Any]) {
-    let oldCurrent = current
-    config = cfg
-    var old = tabs
-    tabs = (cfg["tab"] as? [[String: Any]] ?? []).map { spec in
-      let id = (spec["url"] as? String ?? "") + "\n" + (spec["session"] as? String ?? "")
-      let tab: TabState
-      if let index = old.firstIndex(where: { $0.identity == id }) {
-        tab = old.remove(at: index)
-        tab.spec = spec
-      } else {
-        let wc = WKWebViewConfiguration()
-        let key =
-          (ProcessInfo.processInfo.environment["WEBTABS_DATA"] ?? "default") + ":"
-          + (spec["session"] as? String ?? "shared")
-        wc.websiteDataStore = WKWebsiteDataStore(forIdentifier: profileID(key))
-        wc.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "webtabs")
-        wc.userContentController.addUserScript(
-          WKUserScript(
-            source: notificationJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        let web = WKWebView(frame: .zero, configuration: wc)
-        web.navigationDelegate = self
-        web.uiDelegate = self
-        web.isInspectable = ProcessInfo.processInfo.environment["WEBTABS_DEBUG"] != nil
-        web.allowsBackForwardNavigationGestures = true
-        tab = TabState(spec, web)
-        tab.observation = web.observe(\.title, options: [.new]) { [weak self, weak tab] _, _ in
-          guard let self, let tab else { return }
-          self.updateBadge(tab)
-        }
-      }
-      let ua = try? core(["op": "user_agent", "config": cfg, "tab": spec]) as? String
-      let changedUA = tab.web.customUserAgent != ua
-      tab.web.customUserAgent = ua
-      if tab.web.url == nil {
-        if smoke {
-          tab.web.loadHTMLString(
-            "<html><head><title>(3) Smoke Test</title></head><body><h1>WebTabs native WebKit smoke test</h1><input id='editor' value='working'></body></html>",
-            baseURL: URL(string: "https://webtabs.test"))
-        } else if let url = URL(string: tab.home) {
-          tab.web.load(URLRequest(url: url))
-        }
-      } else if changedUA {
-        tab.web.reload()
-      }
-      return tab
-    }
-    for tab in old {
-      if let session = tab.spec["session"] as? String,
-        !tabs.contains(where: { $0.spec["session"] as? String == session })
-      {
-        tab.web.configuration.websiteDataStore.removeData(
-          ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast
-        ) {}
-      }
-      tab.web.stopLoading()
-      tab.web.configuration.userContentController.removeScriptMessageHandler(
-        forName: "webtabs", contentWorld: .page)
-      tab.observation = nil
-      tab.web.removeFromSuperview()
-    }
-    selected =
-      oldCurrent.flatMap { current in tabs.firstIndex(where: { $0 === current }) }
-      ?? min(selected, max(0, tabs.count - 1))
-    select(selected)
-    configureStatus()
-  }
-  func updateBadge(_ tab: TabState) {
-    if let b = try? core(["op": "badge", "title": tab.web.title ?? ""]) as? [String: Any] {
-      tab.badge = b["label"] as? String ?? ""
-      tab.count = b["count"] as? Int ?? 0
-      tab.unread = b["unread"] as? Bool ?? false
-    }
-    rebuildBar()
-  }
-  func rebuildBar() {
-    for view in bar.arrangedSubviews {
-      bar.removeArrangedSubview(view)
-      view.removeFromSuperview()
-    }
-    for (index, tab) in tabs.enumerated() {
-      let label = tab.spec["label"] as? String ?? tab.name
-      let button = NSButton(
-        title: label + (tab.badge.isEmpty ? "" : "  \(tab.badge)"), target: self,
-        action: #selector(tabClicked(_:)))
-      button.bezelStyle = .rounded
-      button.setButtonType(.pushOnPushOff)
-      button.image = tab.icon
-      button.imagePosition = .imageLeading
-      button.tag = index
-      button.state = index == selected ? .on : .off
-      button.toolTip = tab.name + " — " + tab.home
-      button.setAccessibilityLabel(tab.name)
-      bar.addArrangedSubview(button)
-    }
-    bar.addArrangedSubview(NSButton(title: "+", target: self, action: #selector(addTab)))
-    bar.addArrangedSubview(NSButton(title: "Settings", target: self, action: #selector(settings)))
-    let count = tabs.reduce(0) { $0 + $1.count }
-    let label = count > 0 ? String(count) : (tabs.contains(where: { $0.unread }) ? "•" : "")
-    window.title = (enabled("unread_in_title") && !label.isEmpty ? "(\(label)) " : "") + "WebTabs"
-    NSApp.dockTile.badgeLabel = label.isEmpty ? nil : label
-    status?.button?.title = label.isEmpty ? "" : " \(label)"
-  }
-  func select(_ index: Int) {
-    selected = index
-    content.subviews.filter { $0 is NSTextField }.forEach { $0.removeFromSuperview() }
-    for tab in tabs {
-      let web = tab.web
-      if web.superview !== content {
-        web.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(web)
-        NSLayoutConstraint.activate([
-          web.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-          web.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-          web.topAnchor.constraint(equalTo: content.topAnchor),
-          web.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
-      }
-      web.isHidden = tab !== current
-    }
-    content.layoutSubtreeIfNeeded()
-    if let tab = current {
-      window.makeFirstResponder(tab.web)
-    } else {
-      let label = NSTextField(labelWithString: "Add a web app with + or ⌘T")
-      label.frame = NSRect(x: 30, y: 50, width: 400, height: 40)
-      content.addSubview(label)
-    }
-    rebuildBar()
-  }
-  @objc func tabClicked(_ sender: NSButton) { select(sender.tag) }
+
   @objc func showWindow() {
     window.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
+    NSApp.activate()
   }
+
+  @objc func toggleVisible() {
+    if window.isVisible && window.isKeyWindow && NSApp.isActive {
+      window.orderOut(nil)
+    } else {
+      showWindow()
+    }
+  }
+
+  /// Never hide into a menu bar icon that isn't there.
+  var canHideToTray: Bool { config.tray && config.closeToTray && status != nil }
+
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
   {
     showWindow()
     return true
   }
+
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    if sender === window {
-      if enabled("close_to_tray") && enabled("tray") {
-        sender.orderOut(nil)
-      } else {
-        NSApp.terminate(nil)
-      }
-      return false
+    guard sender === window else { return true }
+    if canHideToTray {
+      sender.orderOut(nil)
+    } else {
+      NSApp.terminate(nil)
     }
-    return true
+    return false
   }
+
   func windowWillClose(_ notification: Notification) {
-    guard let closed = notification.object as? NSWindow, closed !== window else { return }
-    if let web = closed.contentView as? WKWebView {
-      popupHomes.removeValue(forKey: ObjectIdentifier(web))
-      web.stopLoading()
-      web.navigationDelegate = nil
-      web.uiDelegate = nil
-    }
-    popups.removeAll { $0 === closed }
+    if let closed = notification.object as? NSWindow, closed !== window { closePopup(closed) }
   }
-  func configureStatus() {
-    if enabled("tray") {
-      if status == nil {
-        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status?.button?.image = NSImage(
-          systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "WebTabs")
-        let menu = NSMenu()
-        menu.addItem(item("Show WebTabs", #selector(showWindow), ""))
-        menu.addItem(item("Settings…", #selector(settings), ""))
-        menu.addItem(.separator())
-        menu.addItem(item("Quit WebTabs", #selector(quit), "q"))
-        status?.menu = menu
+
+  private func makeStatusItem() {
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    let image = NSImage(size: NSSize(width: 18, height: 16), flipped: false) { _ in
+      // The app icon's shape: three tabs over a window.
+      NSColor.black.setFill()
+      for (i, x) in [1.5, 7, 12.5].enumerated() {
+        NSColor.black.withAlphaComponent(i == 0 ? 1 : 0.5).setFill()
+        NSBezierPath(roundedRect: NSRect(x: x, y: 12, width: 4.5, height: 2.5), xRadius: 1, yRadius: 1)
+          .fill()
       }
-    } else if let status {
+      NSColor.black.setFill()
+      NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 15.5, height: 9), xRadius: 2, yRadius: 2)
+        .fill()
+      return true
+    }
+    image.isTemplate = true
+    item.button?.image = image
+    item.button?.setAccessibilityLabel("WebTabs")
+    // Unread: a red dot on the icon, like Linux's webtabs-unread icon.
+    statusDot.wantsLayer = true
+    statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+    statusDot.layer?.cornerRadius = 3.5
+    statusDot.frame = NSRect(x: 0, y: 0, width: 7, height: 7)
+    statusDot.isHidden = true
+    if let button = item.button {
+      button.addSubview(statusDot)
+      statusDot.frame.origin = NSPoint(x: button.bounds.maxX - 9, y: button.bounds.maxY - 10)
+      statusDot.autoresizingMask = [.minXMargin, .minYMargin]
+    }
+    let menu = NSMenu()
+    menu.delegate = self
+    menu.addItem(withTitle: "Show WebTabs", action: #selector(toggleVisible), keyEquivalent: "")
+      .target = self
+    menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: "")
+      .target = self
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Quit WebTabs", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+    item.menu = menu
+    status = item
+  }
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    let shown = window.isVisible && window.isKeyWindow && NSApp.isActive
+    menu.items.first?.title = shown ? "Hide WebTabs" : "Show WebTabs"
+  }
+
+  func updateEmptyState() {
+    if tabs.isEmpty {
+      currentID = 0
+      emptyState.isHidden = false
+    } else if current == nil {
+      select(tabs[0])
+    }
+  }
+
+  // ---- options --------------------------------------------------------------------
+
+  /// Changes app-wide options from the settings window and persists them.
+  func updateOptions(_ change: (inout Config) -> Void) {
+    let notificationsWereOn = config.notifications
+    change(&config)
+    if config.notifications && !notificationsWereOn { requestNotifications() }
+    applyOptions()
+    save()
+  }
+
+  func applyOptions() {
+    if config.tray && status == nil {
+      makeStatusItem()
+    } else if !config.tray, let status {
       NSStatusBar.system.removeStatusItem(status)
       self.status = nil
     }
-    rebuildBar()
+    settingsWindow?.optionsChanged()
+    refreshUnread()
   }
-  func item(
-    _ title: String, _ action: Selector, _ key: String,
-    _ modifiers: NSEvent.ModifierFlags = .command
-  ) -> NSMenuItem {
-    let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-    item.target = self
-    item.keyEquivalentModifierMask = modifiers
-    return item
+
+  func showError(_ title: String, _ error: Error, in parent: NSWindow? = nil) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = error.localizedDescription
+    if let parent = parent ?? window, parent.isVisible {
+      alert.beginSheetModal(for: parent)
+    } else {
+      alert.runModal()
+    }
   }
-  func makeMenu() {
+
+  func refreshSettings() { settingsWindow?.refresh() }
+
+  @objc func openSettings() {
+    // One settings window at a time (gear, ⌘, and the menu bar can all open it).
+    if settingsWindow == nil { settingsWindow = SettingsWindow(app: self) }
+    settingsWindow?.show()
+  }
+
+  /// Opens tabs.toml in the user's editor (TextEdit when nothing claims .toml).
+  func openConfigFile(_ path: String? = nil) {
+    let url = URL(fileURLWithPath: path ?? configPath)
+    if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+      NSWorkspace.shared.open(url)
+    } else if let editor = NSWorkspace.shared.urlForApplication(
+      withBundleIdentifier: "com.apple.TextEdit")
+    {
+      NSWorkspace.shared.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
+    }
+  }
+
+  // ---- tabs -------------------------------------------------------------------------
+
+  func createTab(_ tab: Tab) -> TabView {
+    let wc = WKWebViewConfiguration()
+    wc.websiteDataStore = store(for: tab.session)
+    // Needed for OAuth/Meet popups; external opens still require a click.
+    // (Pages get no clipboard read access: WebKit's default.)
+    wc.preferences.javaScriptCanOpenWindowsAutomatically = true
+    wc.mediaTypesRequiringUserActionForPlayback = []
+    // "Inspect Element" in the page menu, as Linux enables developer extras.
+    if wc.preferences.responds(to: NSSelectorFromString("_setDeveloperExtrasEnabled:")) {
+      wc.preferences.setValue(true, forKey: "developerExtrasEnabled")
+    }
+    wc.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "webtabs")
+    let web = WKWebView(frame: .zero, configuration: wc)
+    let tv = TabView(id: nextID, tab: tab, web: web)
+    nextID += 1
+    installNotificationShim(tv)
+    web.customUserAgent = Core.userAgent(config, tab)
+    web.navigationDelegate = self
+    web.uiDelegate = self
+    web.isInspectable = true
+    web.allowsBackForwardNavigationGestures = true
+    web.allowsMagnification = true
+    web.isHidden = true
+    if let cached = Icons.cached(tab.url) {
+      // Cached icons are reused; they're refetched only when the URL changes.
+      tv.iconFetched = true
+      tv.setIcon(cached)
+    }
+    tv.titleObservation = web.observe(\.title) { [weak self, weak tv] _, _ in
+      if let self, let tv { self.titleChanged(tv) }
+    }
+    tv.button.onClick = { [weak self, weak tv] in
+      if let self, let tv { self.select(tv) }
+    }
+    tv.button.onMenu = { [weak self, weak tv] in
+      guard let self, let tv else { return nil }
+      return self.tabMenu(tv)
+    }
+    tv.button.onMiddleClick = { [weak tv] in tv?.web.reload() }
+
+    web.translatesAutoresizingMaskIntoConstraints = false
+    content.addSubview(web)
+    NSLayoutConstraint.activate([
+      web.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+      web.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+      web.topAnchor.constraint(equalTo: content.topAnchor),
+      web.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+    ])
+    tabStack.addArrangedSubview(tv.button)
+    return tv
+  }
+
+  private func titleChanged(_ tv: TabView) {
+    let badge = Core.badge(tv.web.title ?? "")
+    guard badge != tv.badge else { return }
+    tv.badge = badge
+    tv.button.badge.text = badge.unread ? badge.label : ""
+    tv.updateTooltip()
+    refreshUnread()
+  }
+
+  /// Reads the page's declared icons, downloads the best one and caches it.
+  func fetchIcon(_ tv: TabView) {
+    let page = tv.web.url?.absoluteString ?? ""
+    // Wait until we're on the tab's own site: the first load is often a login
+    // redirect (accounts.google.com) whose icon isn't the app's.
+    guard !tv.iconFetched, !smoke, Core.sameSite(page, tv.tab.url) else { return }
+    tv.iconFetched = true
+    let (home, generation) = (tv.tab.url, tv.iconGeneration)
+    tv.web.evaluateJavaScript(Core.faviconScript) { [weak tv] result, _ in
+      let links = result as? String ?? "[]"
+      Icons.fetch(Core.favicons(page: page, links: links)) { image in
+        // Gone, or its URL changed while this was downloading.
+        guard let tv, let image, tv.iconGeneration == generation else { return }
+        Icons.store(home, image)
+        tv.setIcon(image)
+      }
+    }
+  }
+
+  func load(_ tv: TabView) {
+    guard !tv.loaded else { return }
+    tv.loaded = true
+    if smoke {
+      tv.web.loadHTMLString(
+        "<html><head><title>(3) Smoke Test</title></head><body><h1>WebTabs native WebKit smoke test</h1><input id='editor' value='working'></body></html>",
+        baseURL: URL(string: "https://webtabs.test"))
+    } else if let url = URL(string: tv.tab.url) {
+      tv.web.load(URLRequest(url: url))
+    }
+  }
+
+  // ---- selection & ordering -------------------------------------------------------
+
+  func select(_ tv: TabView) {
+    currentID = tv.id
+    for t in tabs {
+      t.button.isActive = t === tv
+      t.web.isHidden = t !== tv
+    }
+    emptyState.isHidden = true
+    load(tv)
+    tv.button.scrollToVisible(tv.button.bounds)
+    DispatchQueue.main.async { [weak self, weak tv] in
+      if let self, let tv, self.current === tv { self.window.makeFirstResponder(tv.web) }
+    }
+  }
+
+  func select(index: Int) {
+    if tabs.indices.contains(index) { select(tabs[index]) }
+  }
+
+  var currentIndex: Int? { tabs.firstIndex { $0.id == currentID } }
+
+  /// Makes the bar's button order match `tabs`.
+  private func syncBar() {
+    for (i, tv) in tabs.enumerated() { tabStack.insertArrangedSubview(tv.button, at: i) }
+  }
+
+  func moveTab(_ tv: TabView, _ delta: Int) {
+    guard let i = tabs.firstIndex(where: { $0 === tv }), tabs.indices.contains(i + delta) else {
+      return
+    }
+    tabs.swapAt(i, i + delta)
+    syncBar()
+    save()
+    refreshSettings()
+  }
+
+  func setTabNotifications(_ tv: TabView, _ on: Bool) {
+    tv.tab.notifications = on
+    save()
+  }
+
+  /// Show the first tab immediately, then wake the rest up one by one so the
+  /// window is usable before every web process has started.
+  func loadTabsProgressively() {
+    if let tv = current { load(tv) }
+    loadTimer?.invalidate()
+    loadTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
+      guard let self, let next = self.tabs.first(where: { !$0.loaded }) else {
+        return timer.invalidate()
+      }
+      self.load(next)
+    }
+  }
+
+  func removeTab(_ tv: TabView) {
+    let index = tabs.firstIndex { $0 === tv }
+    detach(tv)
+    tabs.removeAll { $0 === tv }
+    if currentID == tv.id {
+      currentID = 0
+      if let index, !tabs.isEmpty { select(tabs[min(index, tabs.count - 1)]) }
+    }
+    updateEmptyState()
+    refreshUnread()
+  }
+
+  /// Drops a tab's views and web process.
+  private func detach(_ tv: TabView) {
+    tv.titleObservation = nil
+    tv.web.stopLoading()
+    tv.web.configuration.userContentController.removeAllScriptMessageHandlers()
+    tv.web.configuration.userContentController.removeAllUserScripts()
+    tv.web.removeFromSuperview()
+    tabStack.removeArrangedSubview(tv.button)
+    tv.button.removeFromSuperview()
+    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [
+      tv.notificationKey
+    ])
+  }
+
+  private func applyTab(_ tv: TabView, _ new: Tab) {
+    let old = tv.tab
+    tv.tab = new
+    tv.updateTooltip()
+    tv.updateTag()
+    if old.url != new.url {
+      tv.iconFetched = false
+      tv.iconGeneration += 1
+      installNotificationShim(tv)
+    }
+    let ua = Core.userAgent(config, new)
+    if tv.web.customUserAgent != ua {
+      tv.web.customUserAgent = ua
+      if tv.loaded && old.url == new.url { tv.web.reload() }
+    }
+    if old.url != new.url && tv.loaded, let url = URL(string: new.url) {
+      tv.web.load(URLRequest(url: url))
+    }
+  }
+
+  func tabMenu(_ tv: TabView) -> NSMenu {
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    let i = tabs.firstIndex { $0 === tv } ?? 0
+    for item in [
+      ActionItem("Reload") { tv.web.reload() },
+      ActionItem("Go to Home Page") { [weak self] in self?.goHome(tv) },
+      ActionItem("Move Left", enabled: i > 0) { [weak self] in self?.moveTab(tv, -1) },
+      ActionItem("Move Right", enabled: i + 1 < tabs.count) { [weak self] in self?.moveTab(tv, 1) },
+      ActionItem("Edit…") { [weak self] in self?.editTabDialog(tv) },
+      ActionItem("Remove…") { [weak self] in self?.confirmRemove(tv) },
+      .separator(),
+      ActionItem("Add Tab…") { [weak self] in self?.addTabDialog() },
+      ActionItem("Settings…") { [weak self] in self?.openSettings() },
+    ] {
+      menu.addItem(item)
+    }
+    return menu
+  }
+
+  private func goHome(_ tv: TabView) {
+    if let url = URL(string: tv.tab.url) { tv.web.load(URLRequest(url: url)) }
+  }
+
+  @objc func addTab() { addTabDialog() }
+
+  func addTabDialog(parent: NSWindow? = nil) {
+    if parent == nil { showWindow() }
+    TabDialog.present(on: parent ?? window, editing: nil, existing: tabs.map(\.tab)) {
+      [weak self] tab in
+      guard let self else { return }
+      let tv = self.createTab(tab)
+      self.tabs.append(tv)
+      self.select(tv)
+      self.updateEmptyState()
+      self.save()
+      self.refreshSettings()
+    }
+  }
+
+  func editTabDialog(_ tv: TabView, parent: NSWindow? = nil) {
+    if parent == nil { showWindow() }
+    let current = tv.tab
+    TabDialog.present(on: parent ?? window, editing: current, existing: tabs.map(\.tab)) {
+      [weak self, weak tv] tab in
+      // A tabs.toml reload may have removed the tab meanwhile: nothing left to edit.
+      guard let self, let tv, self.tabs.contains(where: { $0 === tv }) else { return }
+      if tab.session != current.session {
+        // A web view can't change profiles; give the tab a fresh one.
+        self.replaceTab(tv, tab)
+        if let key = current.session { self.dropSessionIfUnused(key) }
+      } else {
+        self.applyTab(tv, tab)
+      }
+      self.save()
+      self.refreshSettings()
+    }
+  }
+
+  /// Swaps a tab for a freshly built one in the same position.
+  private func replaceTab(_ old: TabView, _ tab: Tab) {
+    guard let i = tabs.firstIndex(where: { $0 === old }) else { return }
+    let wasCurrent = currentID == old.id
+    let fresh = createTab(tab)
+    tabs[i] = fresh
+    detach(old)
+    syncBar()
+    if wasCurrent { select(fresh) } else { load(fresh) }
+    refreshUnread()
+  }
+
+  func confirmRemove(_ tv: TabView, parent: NSWindow? = nil) {
+    if parent == nil { showWindow() }
+    let session = tv.tab.session
+    let alert = NSAlert()
+    alert.messageText = "Remove “\(tv.tab.name)”?"
+    if session != nil { alert.informativeText = "Its isolated login data is deleted too." }
+    alert.addButton(withTitle: "Remove").hasDestructiveAction = true
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: parent ?? window) { [weak self, weak tv] response in
+      guard response == .alertFirstButtonReturn, let self, let tv,
+        self.tabs.contains(where: { $0 === tv })
+      else { return }
+      self.removeTab(tv)
+      if let key = session { self.dropSessionIfUnused(key) }
+      self.save()
+      self.refreshSettings()
+    }
+  }
+
+  // ---- unread & notifications --------------------------------------------------
+
+  func refreshUnread() {
+    let total = tabs.reduce(0) { $0 + $1.badge.count }
+    let any = tabs.contains { $0.badge.unread }
+    window.title = total > 0 && config.unreadInTitle ? "WebTabs (\(total))" : "WebTabs"
+    NSApp.dockTile.badgeLabel = total > 0 ? String(total) : any ? "•" : nil
+    statusDot.isHidden = !any
+    status?.button?.setAccessibilityLabel(any ? "WebTabs, unread messages" : "WebTabs")
+    // Linux sets the urgency hint; here the Dock icon bounces once.
+    if total > lastUnread && !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+    lastUnread = total
+  }
+
+  func requestNotifications() {
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, error in
+      if let error { NSLog("webtabs: notifications: %@", error.localizedDescription) }
+    }
+  }
+
+  /// Posts a desktop notification; `id` replaces an earlier one with the same id.
+  func post(_ title: String, subtitle: String = "", body: String, info: [String: Any], id: String?)
+  {
+    let c = UNMutableNotificationContent()
+    c.title = String(title.prefix(256))
+    c.subtitle = String(subtitle.prefix(256))
+    c.body = String(body.prefix(4096))
+    c.sound = .default
+    c.userInfo = info
+    UNUserNotificationCenter.current().add(
+      UNNotificationRequest(identifier: id ?? UUID().uuidString, content: c, trigger: nil))
+  }
+
+  /// Web Notification API for the page (WKWebView has none of its own). Granted
+  /// up front on the tab's own origin so chat apps don't show a permission nag.
+  private func installNotificationShim(_ tv: TabView) {
+    let ucc = tv.web.configuration.userContentController
+    ucc.removeAllUserScripts()
+    let origin = URL(string: tv.tab.url).flatMap { u in
+      u.scheme.flatMap { s in u.host.map { "\(s)://\($0)" + (u.port.map { ":\($0)" } ?? "") } }
+    }
+    let home = (try? JSONSerialization.data(withJSONObject: [origin ?? ""]))
+      .flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+    ucc.addUserScript(
+      WKUserScript(
+        source: notificationJS.replacingOccurrences(of: "HOME_ORIGIN", with: "\(home)[0]"),
+        injectionTime: .atDocumentStart, forMainFrameOnly: true))
+  }
+
+  func userContentController(
+    _ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
+    replyHandler: @escaping (Any?, String?) -> Void
+  ) {
+    // Only the tab's own site (a page reached through a redirect gets nothing).
+    guard message.frameInfo.isMainFrame, let web = message.webView, let tv = tab(for: web),
+      let body = message.body as? [String: Any],
+      Core.sameSite(web.url?.absoluteString ?? "", tv.tab.url)
+    else { return replyHandler("denied", nil) }
+    let id = body["id"] as? String ?? ""
+    switch body["op"] as? String {
+    case "permission":
+      replyHandler("granted", nil)
+    case "notify":
+      notify(tv, title: body["title"] as? String ?? "", body: body["body"] as? String ?? "", id: id)
+      replyHandler(nil, nil)
+    case "close":
+      // All of a tab's notifications share one id, so only withdraw when the page
+      // closes the one currently shown (not an older one).
+      if tv.notificationID == id {
+        tv.notificationID = nil
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [
+          tv.notificationKey
+        ])
+      }
+      replyHandler(nil, nil)
+    default:
+      replyHandler(nil, nil)
+    }
+  }
+
+  private func notify(_ tv: TabView, title: String, body: String, id: String) {
+    guard config.notifications, tv.tab.notifications else { return }
+    if window.isKeyWindow && NSApp.isActive && current === tv { return }  // you're looking at it
+    let name = tv.tab.name
+    post(
+      title.isEmpty ? name : title, subtitle: title.isEmpty ? "" : name, body: body,
+      info: ["tab": tv.id, "page": id], id: tv.notificationKey)
+    tv.notificationID = id
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) { completionHandler([.banner, .list, .sound]) }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    let info = response.notification.request.content.userInfo
+    DispatchQueue.main.async {
+      defer { completionHandler() }
+      if let path = info["download"] as? String {
+        return NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+      }
+      guard let id = info["tab"] as? Int, let tv = self.tabs.first(where: { $0.id == id }) else {
+        return
+      }
+      self.showWindow()
+      self.select(tv)
+      // Lets the page jump to the chat/email.
+      if let page = info["page"] as? String, page == tv.notificationID,
+        let data = try? JSONSerialization.data(withJSONObject: [page]),
+        let arg = String(data: data, encoding: .utf8)
+      {
+        tv.notificationID = nil
+        tv.web.evaluateJavaScript("window.__webtabsClick?.(\(arg)[0])")
+      }
+    }
+  }
+
+  // ---- profiles ----------------------------------------------------------------------
+
+  /// The browsing profile a tab runs in, creating isolated ones on demand.
+  private func store(for session: String?) -> WKWebsiteDataStore {
+    guard let key = session else { return sharedStore }
+    // The key is back (re-added, or a config edit in progress): keep its data.
+    pendingDeletes.removeValue(forKey: key)?.cancel()
+    if let store = isolated[key] { return store }
+    let store = WKWebsiteDataStore(forIdentifier: storeID(key))
+    isolated[key] = store
+    // A marker per session, so data left behind (app quit first) is found again.
+    try? FileManager.default.createDirectory(
+      atPath: sessionMarker(key), withIntermediateDirectories: true)
+    return store
+  }
+
+  private func storeID(_ key: String) -> UUID { profileID(namespace + ":session:" + key) }
+  private func sessionMarker(_ key: String) -> String { dataDir + "/sessions/" + key }
+
+  private func sessionInUse(_ key: String) -> Bool { tabs.contains { $0.tab.session == key } }
+
+  /// Deletes an isolated profile's data once no tab uses it anymore. Cookies and
+  /// storage are cleared right away; the profile goes a moment later. A stale
+  /// profile (app quit first) is purged at the next start.
+  func dropSessionIfUnused(_ key: String) {
+    guard !sessionInUse(key) else { return }
+    if let store = isolated.removeValue(forKey: key) {
+      store.removeData(
+        ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast
+      ) {}
+    }
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.pendingDeletes[key] = nil
+      if !self.sessionInUse(key) { self.deleteSession(key) }
+    }
+    pendingDeletes.updateValue(work, forKey: key)?.cancel()
+    // Give the web/network processes a moment to let go of the profile.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+  }
+
+  private func deleteSession(_ key: String, attempt: Int = 0) {
+    WKWebsiteDataStore.remove(forIdentifier: storeID(key)) { [weak self] error in
+      guard let self else { return }
+      guard let error else {
+        try? FileManager.default.removeItem(atPath: self.sessionMarker(key))
+        return
+      }
+      // WebKit lets go of a profile a little after its last page closes; a popup
+      // can keep it open longer. Retry a few times, then at the next start.
+      guard attempt < 3 else {
+        return NSLog("webtabs: cannot delete session %@: %@", key, error.localizedDescription)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Double(2 << attempt)) {
+        if self.isolated[key] == nil && !self.sessionInUse(key) {
+          self.deleteSession(key, attempt: attempt + 1)
+        }
+      }
+    }
+  }
+
+  /// Removes isolated profiles no tab refers to.
+  private func purgeStaleSessions() {
+    let keys = (try? FileManager.default.contentsOfDirectory(atPath: dataDir + "/sessions")) ?? []
+    for key in keys where !sessionInUse(key) { deleteSession(key) }
+  }
+
+  // ---- config file sync -------------------------------------------------------------
+
+  func save() {
+    var cfg = config
+    cfg.tabs = tabs.map(\.tab)
+    do {
+      config = try Core.call("save", ["config": Core.json(cfg)])
+      lastSaved = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+    } catch {
+      NSLog("webtabs: cannot save %@: %@", configPath, error.localizedDescription)
+      showError("Couldn’t save tabs.toml", error)
+    }
+  }
+
+  private func watchConfig() {
+    watchTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+      self?.reloadConfig()
+    }
+  }
+
+  private func reloadConfig() {
+    guard let text = try? String(contentsOfFile: configPath, encoding: .utf8),
+      text != lastSaved, text != lastRejected
+    else { return }
+    let new: Config
+    do {
+      new = try Core.call("parse", ["text": text])
+    } catch {
+      lastRejected = text
+      return post(
+        "WebTabs: tabs.toml not applied", body: error.localizedDescription, info: [:],
+        id: "config-error")
+    }
+    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [
+      "config-error"
+    ])
+    lastSaved = text
+    reconcile(new)
+  }
+
+  /// Keep live web views (and their logins/state) for URLs that survive.
+  func reconcile(_ new: Config) {
+    config = new
+    var old = tabs
+    var next: [TabView] = []
+    for tab in new.tabs {
+      if let i = old.firstIndex(where: { $0.tab.url == tab.url && $0.tab.session == tab.session }) {
+        let tv = old.remove(at: i)
+        applyTab(tv, tab)
+        next.append(tv)
+      } else {
+        next.append(createTab(tab))
+      }
+    }
+    for tv in old {
+      detach(tv)
+      if currentID == tv.id { currentID = 0 }
+    }
+    tabs = next
+    for key in Set(old.compactMap(\.tab.session)) { dropSessionIfUnused(key) }
+    syncBar()
+    updateEmptyState()
+    applyOptions()
+    loadTabsProgressively()
+    refreshSettings()
+  }
+
+  // ---- menus & shortcuts ------------------------------------------------------------
+
+  private func makeMenu() {
     let main = NSMenu()
-    func menu(_ title: String, _ items: [NSMenuItem]) {
+    func menu(_ title: String, _ items: [NSMenuItem]) -> NSMenu {
       let top = NSMenuItem()
       let sub = NSMenu(title: title)
       items.forEach { sub.addItem($0) }
       top.submenu = sub
       main.addItem(top)
+      return sub
     }
-    menu(
+    func item(
+      _ title: String, _ action: Selector, _ key: String = "",
+      _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil, tag: Int = 0,
+      hidden: Bool = false
+    ) -> NSMenuItem {
+      let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+      i.keyEquivalentModifierMask = modifiers
+      i.target = target
+      i.tag = tag
+      // Extra shortcuts for the same command, kept out of sight.
+      i.isHidden = hidden
+      i.allowsKeyEquivalentWhenHidden = hidden
+      return i
+    }
+    _ = menu(
       "WebTabs",
       [
-        item("About WebTabs", #selector(about), ""), item("Settings…", #selector(settings), ","),
-        .separator(), item("Hide WebTabs", #selector(hideApp), "h"),
-        item("Quit WebTabs", #selector(quit), "q"),
+        item("About WebTabs", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        .separator(),
+        item("Settings…", #selector(openSettings), ",", target: self),
+        .separator(),
+        item("Hide WebTabs", #selector(NSApplication.hide(_:)), "h"),
+        item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
+        item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
+        .separator(),
+        item("Quit WebTabs", #selector(NSApplication.terminate(_:)), "q"),
       ])
-    menu(
+    _ = menu(
       "File",
       [
-        item("New Tab…", #selector(addTab), "t"), item("Edit Tab…", #selector(editTab), "e"),
-        item("Remove Tab…", #selector(removeTab), "w", [.command, .shift]), .separator(),
-        item("Close Window", #selector(closeWindow), "w"),
+        item("New Tab…", #selector(addTab), "t", target: self),
+        item("Edit Tab…", #selector(editTab), "e", target: self),
+        item("Remove Tab…", #selector(removeCurrentTab), target: self),
+        .separator(),
+        item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
       ])
-    let edit = NSMenuItem()
-    let em = NSMenu(title: "Edit")
-    for (title, action, key) in [
-      ("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
-      ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a"),
-    ] { em.addItem(NSMenuItem(title: title, action: Selector(action), keyEquivalent: key)) }
-    edit.submenu = em
-    main.addItem(edit)
-    menu(
+    _ = menu(
+      "Edit",
+      [
+        item("Undo", Selector(("undo:")), "z"),
+        item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+        .separator(),
+        item("Cut", #selector(NSText.cut(_:)), "x"),
+        item("Copy", #selector(NSText.copy(_:)), "c"),
+        item("Paste", #selector(NSText.paste(_:)), "v"),
+        item("Paste and Match Style", #selector(NSTextView.pasteAsPlainText(_:)), "v", [.command, .option, .shift]),
+        item("Delete", #selector(NSText.delete(_:))),
+        item("Select All", #selector(NSText.selectAll(_:)), "a"),
+      ])
+    _ = menu(
       "View",
       [
-        item("Reload", #selector(reload), "r"),
-        item("Reload Without Cache", #selector(hardReload), "r", [.command, .shift]),
-        item("Back", #selector(back), "["), item("Forward", #selector(forward), "]"),
-        item("Home", #selector(home), "h", [.command, .shift]), .separator(),
-        item("Zoom In", #selector(zoomIn), "="), item("Zoom Out", #selector(zoomOut), "-"),
-        item("Actual Size", #selector(zoomReset), "0"),
+        item("Reload", #selector(reload), "r", target: self),
+        item("Reload Without Cache", #selector(hardReload), "r", [.command, .shift], target: self),
+        .separator(),
+        item("Back", #selector(back), "[", target: self),
+        item("Forward", #selector(forward), "]", target: self),
+        item("Home Page", #selector(homePage), "h", [.command, .shift], target: self),
+        .separator(),
+        item("Zoom In", #selector(zoomIn), "=", target: self),
+        item("Zoom In", #selector(zoomIn), "+", target: self, hidden: true),
+        item("Zoom Out", #selector(zoomOut), "-", target: self),
+        item("Actual Size", #selector(zoomReset), "0", target: self),
+        .separator(),
+        item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
       ])
     var tabItems = [
-      item("Next Tab", #selector(nextTab), "\t", .control),
-      item("Previous Tab", #selector(previousTab), "\t", [.control, .shift]),
-      item("Move Tab Left", #selector(moveLeft), "[", [.command, .shift]),
-      item("Move Tab Right", #selector(moveRight), "]", [.command, .shift]),
+      item("Next Tab", #selector(nextTab), "\t", .control, target: self),
+      item("Previous Tab", #selector(previousTab), "\t", [.control, .shift], target: self),
+      item("Next Tab", #selector(nextTab), "]", [.command, .shift], target: self, hidden: true),
+      item("Previous Tab", #selector(previousTab), "[", [.command, .shift], target: self, hidden: true),
+      .separator(),
+      item("Move Tab Left", #selector(moveLeft), target: self),
+      item("Move Tab Right", #selector(moveRight), target: self),
+      .separator(),
     ]
     for n in 1...9 {
-      let i = item("Tab \(n == 9 ? "Last" : String(n))", #selector(numberTab(_:)), String(n))
-      i.tag = n
-      tabItems.append(i)
+      // ⌘9 is always the last tab, like browsers.
+      tabItems.append(
+        item(n == 9 ? "Last Tab" : "Tab \(n)", #selector(numberTab(_:)), String(n), target: self, tag: n))
     }
-    menu("Tabs", tabItems)
-    menu(
+    _ = menu("Tabs", tabItems)
+    NSApp.windowsMenu = menu(
       "Window",
-      [item("Show WebTabs", #selector(showWindow), ""), item("Minimize", #selector(minimize), "m")])
+      [
+        item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+        item("Zoom", #selector(NSWindow.performZoom(_:))),
+        .separator(),
+        item("Show WebTabs", #selector(showWindow), target: self),
+        item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))),
+      ])
     NSApp.mainMenu = main
   }
-  @objc func about() { NSApp.orderFrontStandardAboutPanel(nil) }
-  @objc func hideApp() { NSApp.hide(nil) }
-  @objc func quit() { NSApp.terminate(nil) }
-  @objc func closeWindow() { window.performClose(nil) }
-  @objc func minimize() { window.miniaturize(nil) }
+
+  func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    switch item.action {
+    case #selector(editTab), #selector(removeCurrentTab), #selector(reload), #selector(hardReload),
+      #selector(homePage), #selector(zoomIn), #selector(zoomOut), #selector(zoomReset),
+      #selector(nextTab), #selector(previousTab):
+      return current != nil
+    case #selector(back): return current?.web.canGoBack ?? false
+    case #selector(forward): return current?.web.canGoForward ?? false
+    case #selector(moveLeft): return (currentIndex ?? 0) > 0
+    case #selector(moveRight): return currentIndex.map { $0 + 1 < tabs.count } ?? false
+    case #selector(numberTab(_:)): return !tabs.isEmpty
+    default: return true
+    }
+  }
+
+  @objc func editTab() { if let tv = current { editTabDialog(tv) } }
+  @objc func removeCurrentTab() { if let tv = current { confirmRemove(tv) } }
   @objc func reload() { current?.web.reload() }
   @objc func hardReload() { current?.web.reloadFromOrigin() }
   @objc func back() { current?.web.goBack() }
   @objc func forward() { current?.web.goForward() }
-  @objc func home() {
-    if let tab = current, let url = URL(string: tab.home) { tab.web.load(URLRequest(url: url)) }
-  }
-  @objc func zoomIn() { if let w = current?.web { w.pageZoom = min(3, w.pageZoom + 0.1) } }
-  @objc func zoomOut() { if let w = current?.web { w.pageZoom = max(0.5, w.pageZoom - 0.1) } }
+  @objc func homePage() { if let tv = current { goHome(tv) } }
+  @objc func zoomIn() { if let w = current?.web { w.pageZoom = min(4, w.pageZoom * 1.1) } }
+  @objc func zoomOut() { if let w = current?.web { w.pageZoom = max(0.3, w.pageZoom / 1.1) } }
   @objc func zoomReset() { current?.web.pageZoom = 1 }
-  @objc func nextTab() { if !tabs.isEmpty { select((selected + 1) % tabs.count) } }
-  @objc func previousTab() { if !tabs.isEmpty { select((selected + tabs.count - 1) % tabs.count) } }
+  @objc func nextTab() {
+    if !tabs.isEmpty { select(index: ((currentIndex ?? 0) + 1) % tabs.count) }
+  }
+  @objc func previousTab() {
+    if !tabs.isEmpty { select(index: ((currentIndex ?? 0) + tabs.count - 1) % tabs.count) }
+  }
   @objc func numberTab(_ sender: NSMenuItem) {
-    let index = sender.tag == 9 ? tabs.count - 1 : sender.tag - 1
-    if tabs.indices.contains(index) { select(index) }
+    guard !tabs.isEmpty else { return }
+    select(index: sender.tag == 9 ? tabs.count - 1 : min(sender.tag - 1, tabs.count - 1))
   }
-  @objc func moveLeft() { move(-1) }
-  @objc func moveRight() { move(1) }
-  func move(_ delta: Int) {
-    guard tabs.indices.contains(selected + delta) else { return }
-    var specs = tabs.map(\.spec)
-    specs.swapAt(selected, selected + delta)
-    var cfg = config
-    cfg["tab"] = specs
-    save(cfg)
-  }
-  @objc func addTab() { edit(nil) }
-  @objc func editTab() { if tabs.indices.contains(selected) { edit(selected) } }
-  func edit(_ index: Int?) {
-    let spec = index.map { tabs[$0].spec } ?? [:]
-    let alert = NSAlert()
-    alert.messageText = index == nil ? "Add web app" : "Edit web app"
-    alert.addButton(withTitle: "Save")
-    alert.addButton(withTitle: "Cancel")
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 8
-    let name = NSTextField(string: spec["name"] as? String ?? "")
-    let url = NSTextField(string: spec["url"] as? String ?? "")
-    let label = NSTextField(string: spec["label"] as? String ?? "")
-    let agent = NSTextField(string: spec["user_agent"] as? String ?? "")
-    let presets = NSPopUpButton()
-    presets.addItem(withTitle: "Choose a preset…")
-    let choices = (try? core(["op": "presets"]) as? [[String: String]]) ?? []
-    for choice in choices { presets.addItem(withTitle: choice["name"]!) }
-    stack.addArrangedSubview(presets)
-    for (caption, field) in [
-      ("Name", name), ("URL", url), ("Short label (optional)", label),
-      ("User agent (blank uses default)", agent),
-    ] {
-      stack.addArrangedSubview(NSTextField(labelWithString: caption))
-      field.widthAnchor.constraint(equalToConstant: 420).isActive = true
-      stack.addArrangedSubview(field)
-    }
-    let muted = NSButton(checkboxWithTitle: "Mute notifications", target: nil, action: nil)
-    muted.state = spec["notifications"] as? Bool == false ? .on : .off
-    let isolated = NSButton(checkboxWithTitle: "Isolated login", target: nil, action: nil)
-    isolated.state = spec["session"] != nil ? .on : .off
-    stack.addArrangedSubview(muted)
-    stack.addArrangedSubview(isolated)
-    let handler = ClosureAction {
-      let i = presets.indexOfSelectedItem - 1
-      if choices.indices.contains(i) {
-        name.stringValue = choices[i]["name"]!
-        url.stringValue = choices[i]["url"]!
-      }
-    }
-    presets.target = handler
-    presets.action = #selector(ClosureAction.run)
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 340)
-    alert.accessoryView = stack
-    withExtendedLifetime(handler) {
-      guard alert.runModal() == .alertFirstButtonReturn else { return }
-      var new: [String: Any] = [
-        "name": name.stringValue, "url": url.stringValue, "notifications": muted.state != .on,
-      ]
-      if !label.stringValue.isEmpty { new["label"] = label.stringValue }
-      if !agent.stringValue.isEmpty { new["user_agent"] = agent.stringValue }
-      if isolated.state == .on {
-        new["session"] =
-          spec["session"]
-          ?? (try? core([
-            "op": "session_key", "name": name.stringValue,
-            "taken": tabs.compactMap { $0.spec["session"] as? String },
-          ]))
-      }
-      var specs = tabs.map(\.spec)
-      if let index { specs[index] = new } else { specs.append(new) }
-      var cfg = config
-      cfg["tab"] = specs
-      save(cfg)
-      if index == nil && tabs.count == specs.count { select(tabs.count - 1) }
-    }
-  }
-  @objc func removeTab() {
-    guard let tab = current else { return }
-    let alert = NSAlert()
-    alert.messageText = "Remove \(tab.name)?"
-    alert.informativeText = "An isolated login will be cleared if no other tab uses it."
-    alert.addButton(withTitle: "Remove")
-    alert.addButton(withTitle: "Cancel")
-    if alert.runModal() == .alertFirstButtonReturn {
-      var specs = tabs.map(\.spec)
-      specs.remove(at: selected)
-      var cfg = config
-      cfg["tab"] = specs
-      save(cfg)
-    }
-  }
-  @objc func settings() {
-    let alert = NSAlert()
-    alert.messageText = "WebTabs Settings"
-    alert.addButton(withTitle: "Save")
-    alert.addButton(withTitle: "Cancel")
-    alert.addButton(withTitle: "Open Config")
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 12
-    var switches: [String: NSButton] = [:]
-    for (key, title) in [
-      ("notifications", "Allow desktop notifications"), ("tray", "Show menu bar icon"),
-      ("close_to_tray", "Keep running when the window closes"),
-      ("unread_in_title", "Show unread count in window title"),
-    ] {
-      let button = NSButton(checkboxWithTitle: title, target: nil, action: nil)
-      button.state = enabled(key) ? .on : .off
-      switches[key] = button
-      stack.addArrangedSubview(button)
-    }
-    let login = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
-    login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-    stack.addArrangedSubview(login)
-    stack.addArrangedSubview(
-      NSTextField(
-        wrappingLabelWithString:
-          "Use the Tabs menu to switch or reorder tabs, and ⌘E to edit the selected tab."))
-    stack.frame = NSRect(x: 0, y: 0, width: 390, height: 220)
-    alert.accessoryView = stack
-    let result = alert.runModal()
-    if result == .alertThirdButtonReturn {
-      NSWorkspace.shared.open(URL(fileURLWithPath: configPath))
-      return
-    }
-    guard result == .alertFirstButtonReturn else { return }
-    var cfg = config
-    for (key, button) in switches { cfg[key] = button.state == .on }
-    save(cfg)
-    do {
-      if login.state == .on && SMAppService.mainApp.status != .enabled {
-        try SMAppService.mainApp.register()
-      } else if login.state == .off && SMAppService.mainApp.status == .enabled {
-        try SMAppService.mainApp.unregister()
-      }
-    } catch { showError(error) }
-  }
-  func showError(_ error: Error) {
-    let alert = NSAlert(error: error)
-    alert.runModal()
-  }
-  func homeFor(_ web: WKWebView) -> String {
-    tabs.first(where: { $0.web === web })?.home ?? popupHomes[ObjectIdentifier(web)] ?? ""
-  }
-  func inApp(_ web: WKWebView, _ url: URL?) -> Bool {
-    (try? core(["op": "route", "home": homeFor(web), "url": url?.absoluteString ?? ""]) as? Bool)
-      ?? false
-  }
-  func external(_ url: URL?) {
-    guard let url,
-      ["http", "https", "mailto", "tel", "slack", "zoommtg"].contains(
-        url.scheme?.lowercased() ?? "")
-    else { return }
-    NSWorkspace.shared.open(url)
-  }
-  func webView(
-    _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
-    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-  ) {
-    let popup = popupHomes[ObjectIdentifier(webView)] != nil
-    if (action.navigationType == .linkActivated || popup)
-      && action.targetFrame?.isMainFrame != false && !inApp(webView, action.request.url)
-    {
-      external(action.request.url)
-      decisionHandler(.cancel)
-    } else if action.shouldPerformDownload {
-      decisionHandler(.download)
-    } else {
-      decisionHandler(.allow)
-    }
-  }
-  func webView(
-    _ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-    for action: WKNavigationAction, windowFeatures: WKWindowFeatures
-  ) -> WKWebView? {
-    guard inApp(webView, action.request.url) else {
-      external(action.request.url)
-      return nil
-    }
-    let web = WKWebView(frame: .zero, configuration: configuration)
-    web.navigationDelegate = self
-    web.uiDelegate = self
-    web.customUserAgent = webView.customUserAgent
-    popupHomes[ObjectIdentifier(web)] = homeFor(webView)
-    let popup = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 640, height: 760),
-      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-    popup.title = "Sign in — WebTabs"
-    popup.contentView = web
-    popup.delegate = self
-    popup.isReleasedWhenClosed = false
-    popups.append(popup)
-    popup.center()
-    popup.makeKeyAndOrderFront(nil)
-    return web
-  }
-  func webViewDidClose(_ webView: WKWebView) {
-    popups.first(where: { $0.contentView === webView })?.close()
-  }
-  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
-  func webView(
-    _ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
-    initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void
-  ) {
-    let a = NSAlert()
-    a.messageText = frame.securityOrigin.host
-    a.informativeText = message
-    a.runModal()
-    completionHandler()
-  }
-  func webView(
-    _ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
-    initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void
-  ) {
-    let a = NSAlert()
-    a.messageText = frame.securityOrigin.host
-    a.informativeText = message
-    a.addButton(withTitle: "OK")
-    a.addButton(withTitle: "Cancel")
-    completionHandler(a.runModal() == .alertFirstButtonReturn)
-  }
-  func webView(
-    _ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
-    defaultText: String?, initiatedByFrame frame: WKFrameInfo,
-    completionHandler: @escaping (String?) -> Void
-  ) {
-    let a = NSAlert()
-    a.messageText = prompt
-    let field = NSTextField(string: defaultText ?? "")
-    field.frame = NSRect(x: 0, y: 0, width: 340, height: 24)
-    a.accessoryView = field
-    a.addButton(withTitle: "OK")
-    a.addButton(withTitle: "Cancel")
-    completionHandler(a.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
-  }
-  func webView(
-    _ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
-    initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void
-  ) {
-    let panel = NSOpenPanel()
-    panel.allowsMultipleSelection = parameters.allowsMultipleSelection
-    panel.canChooseDirectories = parameters.allowsDirectories
-    panel.begin { response in completionHandler(response == .OK ? panel.urls : nil) }
-  }
-  func webView(
-    _ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
-    decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
-  ) { decisionHandler(response.canShowMIMEType ? .allow : .download) }
-  func webView(
-    _ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload
-  ) {
-    downloads.append(download)
-    download.delegate = self
-  }
-  func webView(
-    _ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload
-  ) {
-    downloads.append(download)
-    download.delegate = self
-  }
-  func download(
-    _ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
-    completionHandler: @escaping (URL?) -> Void
-  ) {
-    let panel = NSSavePanel()
-    panel.nameFieldStringValue = suggestedFilename
-    panel.begin { result in completionHandler(result == .OK ? panel.url : nil) }
-  }
-  func downloadDidFinish(_ download: WKDownload) { downloads.removeAll { $0 === download } }
-  func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-    downloads.removeAll { $0 === download }
-    showError(error)
-  }
-  func webView(
-    _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
-    withError error: Error
-  ) {
-    guard (error as NSError).code != NSURLErrorCancelled else { return }
-    NSLog("WebTabs navigation failed for %@: %@", homeFor(webView), error.localizedDescription)
-    if let tab = tabs.first(where: { $0.web === webView }) {
-      let message = NSTextField(
-        wrappingLabelWithString:
-          "Could not load \(tab.name): \(error.localizedDescription)\nPress ⌘R to retry.")
-      message.frame = NSRect(x: 30, y: 60, width: 460, height: 90)
-      webView.addSubview(message)
-    }
-  }
-  func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-    webView.subviews.filter { $0 is NSTextField }.forEach { $0.removeFromSuperview() }
-  }
-  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    if !smoke, let tab = tabs.first(where: { $0.web === webView }),
-      let script = try? core(["op": "favicon_script"]) as? String
-    {
-      webView.evaluateJavaScript(script) { [weak self, weak tab] result, _ in
-        guard let self, let tab, let links = result as? String,
-          let candidates = try? core([
-            "op": "favicons", "url": webView.url?.absoluteString ?? tab.home, "links": links,
-          ]) as? [String],
-          let candidate = candidates.first, let url = URL(string: candidate),
-          ["https", "http"].contains(url.scheme ?? "")
-        else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
-          guard let data, data.count < 2_000_000 else { return }
-          DispatchQueue.main.async {
-            if let icon = NSImage(data: data) {
-              icon.size = NSSize(width: 16, height: 16)
-              tab.icon = icon
-              self.rebuildBar()
-            }
-          }
-        }.resume()
-      }
-    }
-    guard smoke && !smokeComplete else { return }
-    smokeComplete = true
-    webView.evaluateJavaScript("document.getElementById('editor').value + ':' + document.title") {
-      value, error in
-      guard error == nil, value as? String == "working:(3) Smoke Test",
-        self.tabs.contains(where: { $0.count == 3 })
-      else {
-        fputs("SMOKE FAIL: DOM or title badge\n", stderr)
-        exit(1)
-      }
-      self.smokeComplete = true
-      let existing = self.current!.web
-      self.apply(self.config)
-      precondition(self.current!.web === existing, "Config reconciliation discarded a live tab")
-      self.nextTab()
-      precondition(
-        self.current!.web.frame.width > 0 && !self.current!.web.isHidden,
-        "Tab switch has no viewport")
-      let cookies = webView.configuration.websiteDataStore.httpCookieStore
-      cookies.getAllCookies { stored in
-        if CommandLine.arguments.contains("--verify-profile") {
-          guard stored.contains(where: { $0.name == "webtabs-smoke" && $0.value == "persistent" })
-          else {
-            fputs("SMOKE FAIL: cookie did not survive app restart\n", stderr)
-            exit(1)
-          }
-        }
-        let cookie = HTTPCookie(properties: [
-          .domain: "webtabs.test", .path: "/", .name: "webtabs-smoke", .value: "persistent",
-          .expires: Date(timeIntervalSinceNow: 86400),
-        ])!
-        cookies.setCookie(cookie) {
-          print(
-            "SMOKE PASS: WebKit DOM, Rust badges, tab switching, live-view reconciliation, persistent cookie"
-          )
-          DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
-        }
-      }
-    }
-  }
-  func userContentController(
-    _ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
-    replyHandler: @escaping (Any?, String?) -> Void
-  ) {
-    guard message.frameInfo.isMainFrame,
-      let tab = tabs.first(where: { $0.web === message.webView }), enabled("notifications"),
-      tab.spec["notifications"] as? Bool != false, let body = message.body as? [String: Any]
-    else {
-      replyHandler("denied", nil)
-      return
-    }
-    let center = UNUserNotificationCenter.current()
-    if body["op"] as? String == "permission" {
-      center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-        DispatchQueue.main.async { replyHandler(granted ? "granted" : "denied", nil) }
-      }
-      return
-    }
-    if body["op"] as? String == "notify" {
-      let c = UNMutableNotificationContent()
-      c.title = String((body["title"] as? String ?? tab.name).prefix(256))
-      c.body = String((body["body"] as? String ?? "").prefix(4096))
-      c.sound = .default
-      c.userInfo = ["tab": tab.identity, "id": body["id"] as? String ?? ""]
-      center.add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
-    }
-    replyHandler("ok", nil)
-  }
-  func userNotificationCenter(
-    _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
-    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-  ) { completionHandler([.banner, .sound]) }
-  func userNotificationCenter(
-    _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-    withCompletionHandler completionHandler: @escaping () -> Void
-  ) {
-    DispatchQueue.main.async {
-      if let index = self.tabs.firstIndex(where: {
-        $0.identity == response.notification.request.content.userInfo["tab"] as? String
-      }) {
-        self.select(index)
-        self.showWindow()
-        let id = response.notification.request.content.userInfo["id"] as? String ?? ""
-        if let data = try? JSONSerialization.data(withJSONObject: [id]),
-          let arg = String(data: data, encoding: .utf8)
-        {
-          self.current?.web.evaluateJavaScript("window.__webtabsClick?.(\(arg)[0])")
-        }
-      }
-      completionHandler()
-    }
-  }
+  @objc func moveLeft() { if let tv = current { moveTab(tv, -1) } }
+  @objc func moveRight() { if let tv = current { moveTab(tv, 1) } }
 }
-final class ClosureAction: NSObject {
-  let body: () -> Void
-  init(_ body: @escaping () -> Void) { self.body = body }
-  @objc func run() { body() }
-}
+
+/// The page's `Notification`, bridged to native notifications. `HOME_ORIGIN` is
+/// the tab's own origin (permission starts granted there, like Linux pre-grants).
 let notificationJS = """
   (() => {
+    const post = m => window.webkit.messageHandlers.webtabs.postMessage(m);
     const instances = new Map();
-    let permission = 'default';
-    class NativeNotification extends EventTarget {
+    let permission = location.origin === HOME_ORIGIN ? 'granted' : 'default';
+    class Notification extends EventTarget {
       static get permission() { return permission; }
       static async requestPermission(callback) {
-        permission = await window.webkit.messageHandlers.webtabs.postMessage({op:'permission'});
-        callback?.(permission); return permission;
+        permission = await post({op: 'permission'});
+        callback?.(permission);
+        return permission;
       }
       constructor(title, options = {}) {
-        super(); this.title = String(title); this.body = String(options.body || '');
-        const id = crypto.randomUUID(); instances.set(id, this); this.id = id;
-        if (permission === 'granted') window.webkit.messageHandlers.webtabs.postMessage({op:'notify', id, title:this.title, body:this.body});
-        setTimeout(() => instances.delete(id), 86400000);
+        super();
+        this.title = String(title);
+        this.body = String(options.body ?? '');
+        this.tag = String(options.tag ?? '');
+        this.onclick = this.onclose = this.onshow = this.onerror = null;
+        this.id = Date.now() + '-' + Math.random().toString(36).slice(2);
+        instances.set(this.id, this);
+        if (permission === 'granted') post({op: 'notify', id: this.id, title: this.title, body: this.body});
+        setTimeout(() => instances.delete(this.id), 86400000);
       }
-      close() { instances.delete(this.id); }
+      close() { if (instances.delete(this.id)) post({op: 'close', id: this.id}); }
     }
-    window.__webtabsClick = id => { const n = instances.get(id); if(n) { const e = new Event('click'); n.dispatchEvent(e); n.onclick?.(e); } };
-    Object.defineProperty(window, 'Notification', {value:NativeNotification, configurable:true});
+    window.__webtabsClick = id => {
+      const n = instances.get(id);
+      if (!n) return;
+      const e = new Event('click');
+      n.dispatchEvent(e);
+      n.onclick?.call(n, e);
+    };
+    Object.defineProperty(window, 'Notification', {value: Notification, configurable: true, writable: true});
   })();
   """
+
 let app = NSApplication.shared
 let delegate = App()
 app.delegate = delegate

@@ -18,48 +18,55 @@ make test        # shared Rust tests + clippy (rustup component add clippy)
 ```
 
 The build also detects a project-local Rust installation at `target/toolchain`.
-The app is ad-hoc signed for local use; distributing it to other Macs requires
-Developer ID signing and notarization. No Electron or bundled browser engine.
+It signs with an "Apple Development" identity or the local "WebTabs Local Signing"
+one when present, otherwise ad-hoc. Ad-hoc builds change identity on every
+rebuild, so macOS asks again for Keychain access to WebKit's "WebTabs WebCrypto
+Master Key". Run `scripts/macos-signing-identity.sh` once to create the local
+identity; `WEBTABS_SIGN_IDENTITY=-` forces ad-hoc. Distributing to other Macs
+needs Developer ID signing and notarization.
 
-Use ⌘T to add a tab, ⌘E to edit, ⌘, for settings, ⌘1…9 to switch,
-Control-Tab to cycle, and the Tabs menu to reorder. ⌘W closes the window
-(or keeps the app in the menu bar when enabled); ⌘Q quits. Standard copy/paste,
-reload, navigation and zoom shortcuts are available in the menus.
+The Mac app works like the Linux one described below: the same icon tab bar
+(unread bubbles, icon tags, `+` and the gear), right-click tab menu, middle-click
+to reload, the add/edit sheet with presets and Advanced, and the settings window
+with its tab manager. Shortcuts use ⌘ instead of Ctrl (⌘T, ⌘E, ⌘,, ⌘1…9,
+⌃Tab or ⇧⌘] / ⇧⌘[, ⌘R, ⌘[ / ⌘], ⇧⌘H for the tab's home page); the menu bar icon
+replaces the tray. Downloads go to ~/Downloads with a notification.
 
-Config lives in `~/Library/Application Support/webtabs/tabs.toml` and reloads
-on edits. WebKit manages persistent profiles in its own application storage;
-`WEBTABS_DATA` selects a separate profile namespace on Mac rather than moving
-WebKit's files. Shared tabs use one profile; isolated tabs have separate
-persistent cookies/storage. Removing the last tab using an isolated session
-clears that session's website data. Start at login uses macOS Login Items.
-
-macOS supports page-created desktop notifications through a native bridge,
-including mute settings and click-to-focus. Service-worker/push notifications,
-site-specific authenticated calls, DRM, and SSO flows have not been validated.
-Camera and microphone access use WebKit/macOS permission prompts. Site icons are
-loaded into memory on Mac; Linux additionally caches them to disk. Inspector
-support is enabled by `WEBTABS_DEBUG=1` (Safari's Develop menu).
+Config lives in `~/Library/Application Support/webtabs/tabs.toml`, site icons in
+`~/Library/Application Support/webtabs/favicons`. WebKit keeps the browsing
+profiles itself; `WEBTABS_DATA` selects a separate set of them (and of icons).
+Removing the last tab of an isolated session deletes that profile.
+Notifications use a page `Notification` bridge; service-worker push
+notifications are not supported. Pages are inspectable from Safari's Develop
+menu and with "Inspect Element".
 
 ### Shared implementation
 
 `src/config.rs`, `badge.rs`, `links.rs`, `favicon.rs`, and `presets.rs` are the
 single source for both platforms: TOML parsing and validation, URL normalization,
-user agents, session naming, unread parsing, link routing, favicon ranking, and
-presets. `src/lib.rs` exposes these functions to Swift through an owned JSON/C
-interface. Rust allocates responses and Swift always releases them through Rust.
+user agents, session naming, unread parsing, link routing and the external-link
+allowlist, favicon ranking and cache paths, and presets. `src/lib.rs` exposes
+them to Swift through an owned JSON/C interface; Rust allocates responses and
+Swift always releases them through Rust.
 
-`src/linux/` owns GTK/WebKitGTK integration. `macos/main.swift` owns AppKit/WKWebView
-integration: controls, webview lifetimes, OS notifications, menus, profile storage,
-and login registration. Tab-view reconciliation is platform-specific because it
-owns native widgets; it does not duplicate configuration or routing rules.
+`src/linux/` owns GTK/WebKitGTK integration; `macos/` owns AppKit/WKWebView and
+follows the same structure: `main.swift` (window, tabs, notifications, config
+sync, like `linux/mod.rs`), `Web.swift` (`web.rs`), `TabDialog.swift`
+(`tab_dialog.rs`), `Settings.swift` (`settings.rs`), `Icons.swift` (`icons.rs`),
+`TabBar.swift` (the bar's views) and `Core.swift` (the bridge).
 
-For a deterministic native rendering test with a separate config/profile:
+A native test with its own config and profile (generated pages, no accounts)
+covers the bar, tab menu, add/edit sheets, settings, removal, empty state,
+isolated-profile cleanup and, run a second time with `--verify-profile`, that a
+cookie survives the restart:
 
 ```sh
 WEBTABS_CONFIG="$PWD/target/smoke/tabs.toml" \
 WEBTABS_DATA="$PWD/target/smoke/profile" \
 target/release/WebTabs.app/Contents/MacOS/WebTabs --smoke-test
 ```
+
+Add `WEBTABS_SNAPSHOTS=<dir>` to save PNGs of the native windows it opens.
 
 The following installation instructions and Ctrl-based shortcuts describe Linux.
 
