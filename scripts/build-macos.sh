@@ -19,6 +19,18 @@ xcrun swiftc -swift-version 5 -O -module-cache-path "$PWD/target/swift-cache" \
     -framework UserNotifications -framework ServiceManagement -framework Security \
     -liconv -o "$STAGE/Contents/MacOS/WebTabs"
 xcrun swift -module-cache-path "$PWD/target/swift-cache" scripts/macos-icon.swift "$PWD/target/WebTabs.iconset"
+# Modern macOS needs an explicit icon background; otherwise legacy transparent
+# ICNS artwork can receive a pale fallback plate in the Dock.
+mkdir -p target/WebTabs.icon/Assets
+cp macos/icon.json target/WebTabs.icon/icon.json
+cp target/WebTabs.iconset/icon_512x512@2x.png target/WebTabs.icon/Assets/artwork.png
+xcrun actool target/WebTabs.icon --compile "$STAGE/Contents/Resources" \
+    --output-format human-readable-text --notices --warnings --errors \
+    --output-partial-info-plist target/icon-info.plist --app-icon WebTabs \
+    --include-all-app-icons --enable-on-demand-resources NO \
+    --development-region en --target-device mac --minimum-deployment-target 14.0 \
+    --platform macosx
+# Retain the full-resolution legacy icon for macOS versions before Icon Composer.
 iconutil -c icns target/WebTabs.iconset -o "$STAGE/Contents/Resources/WebTabs.icns"
 cp macos/Info.plist "$STAGE/Contents/Info.plist"
 # A stable identity keeps the app's identity across rebuilds, so the Keychain

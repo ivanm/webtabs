@@ -5,6 +5,7 @@
 <key>CFBundleName</key><string>WebTabs</string>
 <key>CFBundleDisplayName</key><string>WebTabs</string>
 <key>CFBundleIconFile</key><string>WebTabs.icns</string>
+<key>CFBundleIconName</key><string>WebTabs</string>
 <key>CFBundleExecutable</key><string>WebTabs</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
