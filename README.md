@@ -19,6 +19,18 @@ cargo build --release      # target\release\webtabs.exe
 target\release\webtabs.exe # --hidden starts in the tray
 ```
 
+Releases include `WebTabs-<version>-windows-x64.msi`, a per-user installer
+(`%LOCALAPPDATA%\Programs\WebTabs`, Start menu shortcut, no admin prompt; it
+asks for the WebView2 Runtime on a Windows 10 PC without it), and a portable
+`webtabs-<version>-windows-x64.zip`. Both are unsigned, so SmartScreen warns the
+first time (More info › Run anyway). Uninstalling keeps your tabs and logins.
+Build them locally with WiX 5 (`dotnet tool install --global wix --version 5.0.2`):
+
+```powershell
+pwsh scripts\package-windows.ps1     # target\dist: .msi, .zip, SHA256SUMS-windows
+pwsh scripts\check-windows-msi.ps1   # installs, checks and uninstalls the MSI
+```
+
 Config lives in `%APPDATA%\webtabs\tabs.toml`, WebView2 profiles in
 `%LOCALAPPDATA%\webtabs\WebView2` (one `shared` profile plus one per isolated
 session). The prototype has the icon tab bar with unread bubbles and tags, the
@@ -55,7 +67,8 @@ Pushing a tag builds both platforms on GitHub Actions and publishes a release
 with `WebTabs-macOS.zip` (Apple Silicon + Intel) and, for Linux,
 `webtabs-<version>-linux-x86_64.tar.gz`, `webtabs_<version>_amd64.deb` and
 `SHA256SUMS-linux`, plus the Arch package `webtabs-<version>-1-x86_64.pkg.tar.zst`
-and `SHA256SUMS-arch`. `make package` builds the Linux files locally into
+and `SHA256SUMS-arch`, and for Windows `WebTabs-<version>-windows-x64.msi`,
+`webtabs-<version>-windows-x64.zip` and `SHA256SUMS-windows`. `make package` builds the Linux files locally into
 `target/dist` (the `.deb` only where `dpkg-deb` exists); `make package-arch` builds
 the Arch package from the current commit:
 

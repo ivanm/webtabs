@@ -1,16 +1,17 @@
 // Windows resources for webtabs.exe (compiled by build.rs).
 // Icon 1 is the app icon Explorer shows; icon 2 is the tray's unread variant.
 // Both are generated from assets/webtabs-macos.png, see assets/windows/README.
+// build.rs fills in @DIR@ and the @VER...@ placeholders from Cargo.toml.
 
-1 ICON "webtabs.ico"
-2 ICON "webtabs-unread.ico"
+1 ICON "@DIR@/webtabs.ico"
+2 ICON "@DIR@/webtabs-unread.ico"
 
 // RT_MANIFEST (24), CREATEPROCESS_MANIFEST_RESOURCE_ID (1)
-1 24 "webtabs.exe.manifest"
+1 24 "@DIR@/webtabs.exe.manifest"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION @VER_COMMAS@
+PRODUCTVERSION @VER_COMMAS@
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -20,11 +21,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "vaan.dev"
       VALUE "FileDescription", "WebTabs"
-      VALUE "FileVersion", "0.1.0"
+      VALUE "FileVersion", "@VER@"
       VALUE "InternalName", "webtabs"
       VALUE "OriginalFilename", "webtabs.exe"
       VALUE "ProductName", "WebTabs"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "ProductVersion", "@VER@"
     END
   END
   BLOCK "VarFileInfo"

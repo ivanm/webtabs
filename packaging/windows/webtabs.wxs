@@ -1,0 +1,52 @@
+<!--
+  WebTabs per-user MSI (WiX v5): installs to %LOCALAPPDATA%\Programs\WebTabs with a
+  Start menu shortcut, no admin prompt. Built by scripts/package-windows.ps1:
+    wix build webtabs.wxs -arch x64 -d Version=0.2.0 -d Exe=...\webtabs.exe -d Icon=...\webtabs.ico
+  Uninstalling keeps the user's tabs and logins (%APPDATA%\webtabs, %LOCALAPPDATA%\webtabs).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- Never change the UpgradeCode: it ties every release together for upgrades. -->
+  <Package Name="WebTabs" Manufacturer="vaan.dev" Version="$(Version)"
+           UpgradeCode="5B0C7E2A-3D44-4C55-9E1A-7F2B6C1D8E90" Scope="perUser" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of WebTabs is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="WebTabsIcon" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="WebTabsIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ivanm/webtabs" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!-- WebView2 Runtime: Microsoft's documented registry check (machine-wide or
+         per-user install; "0.0.0.0" means removed). Always there on Windows 11. -->
+    <Property Id="WV2_MACHINE">
+      <RegistrySearch Id="Wv2Machine" Root="HKLM" Bitness="always64" Type="raw" Name="pv"
+        Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" />
+    </Property>
+    <Property Id="WV2_USER">
+      <RegistrySearch Id="Wv2User" Root="HKCU" Type="raw" Name="pv"
+        Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" />
+    </Property>
+    <Launch Condition="Installed OR (WV2_MACHINE AND WV2_MACHINE &lt;&gt; &quot;0.0.0.0&quot;) OR (WV2_USER AND WV2_USER &lt;&gt; &quot;0.0.0.0&quot;)"
+      Message="WebTabs needs the Microsoft Edge WebView2 Runtime. Get it from https://go.microsoft.com/fwlink/p/?LinkId=2124703 and then run this installer again." />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="WebTabs" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- Per-user files need a registry key path (they live in the user's profile). -->
+    <Component Id="App" Directory="INSTALLFOLDER" Guid="9F4A1C3E-6B2D-4E8F-A1C7-3D5E2B9F0A64">
+      <File Id="WebTabsExe" Name="webtabs.exe" Source="$(Exe)" KeyPath="no" />
+      <RegistryValue Root="HKCU" Key="Software\vaan.dev\WebTabs" Name="InstallDir"
+                     Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="WebTabs"
+                Description="Your web apps in one tiny window"
+                Target="[INSTALLFOLDER]webtabs.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+    </Component>
+  </Package>
+</Wix>

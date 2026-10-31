@@ -1,5 +1,6 @@
 # Builds WebTabs for macOS (one app for Apple Silicon and Intel) and Linux
-# (tarball + .deb on Ubuntu, a pacman package on Arch).
+# (tarball + .deb on Ubuntu, a pacman package on Arch) and Windows (per-user MSI
+# and a portable zip, unsigned).
 # Push a tag like v0.2.0 to publish a GitHub Release with both; run it by hand
 # (Actions › Release › Run workflow) to get the builds as artifacts only.
 #
@@ -132,9 +133,46 @@ jobs:
             target/dist/webtabs-*.pkg.tar.zst
             target/dist/SHA256SUMS-arch
 
+  windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: |
+          cargo test --locked
+          if ($LASTEXITCODE) { exit 1 }
+          cargo clippy --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE) { exit 1 }
+      - name: WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Build and package
+        env:
+          WEBTABS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./scripts/package-windows.ps1
+      - name: WebView2 Runtime
+        # The MSI refuses to install without it (as on a bare Windows 10).
+        run: |
+          $key = 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $pv = (Get-ItemProperty "HKLM:\$key" -ErrorAction SilentlyContinue).pv
+          if ($pv -and $pv -ne '0.0.0.0') { "WebView2 Runtime $pv"; exit 0 }
+          Invoke-WebRequest https://go.microsoft.com/fwlink/p/?LinkId=2124703 -OutFile "$env:TEMP\wv2.exe"
+          Start-Process "$env:TEMP\wv2.exe" -ArgumentList '/silent /install' -Wait
+      - name: Check installer
+        run: ./scripts/check-windows-msi.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webtabs-windows-x64
+          path: |
+            target/dist/WebTabs-*-windows-x64.msi
+            target/dist/webtabs-*-windows-x64.zip
+            target/dist/SHA256SUMS-windows
+
   release:
     if: github.ref_type == 'tag'
-    needs: [macos, linux, arch]
+    needs: [macos, linux, arch, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -146,4 +184,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" WebTabs-macOS.zip webtabs-*.tar.gz webtabs_*.deb \
             SHA256SUMS-linux webtabs-*.pkg.tar.zst SHA256SUMS-arch \
+            WebTabs-*-windows-x64.msi webtabs-*-windows-x64.zip SHA256SUMS-windows \
             --repo "$GITHUB_REPOSITORY" --title "WebTabs $GITHUB_REF_NAME" --generate-notes
