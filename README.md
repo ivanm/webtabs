@@ -4,7 +4,64 @@ Your web apps (WhatsApp, Gmail, Calendar, Slack, internal dashboards) as tabs in
 one small native window. No account, no store, no Electron.
 
 - **Linux:** Rust + GTK3 + WebKitGTK (the system webview). About 1–2 MB binary.
-- **macOS:** planned, with a native WKWebView backend reusing the same core (`config`, `badge`, `links`).
+- **macOS 14+:** native AppKit + WKWebView, linked to the same Rust core as Linux.
+
+## Build and run on macOS
+
+Requires Xcode (or the Command Line Tools with the Swift compiler) and stable Rust.
+
+```sh
+make build       # target/release/WebTabs.app, native to this Mac's architecture
+open target/release/WebTabs.app
+make install     # optional: copy to ~/Applications/WebTabs.app
+make test        # shared Rust tests + clippy (rustup component add clippy)
+```
+
+The build also detects a project-local Rust installation at `target/toolchain`.
+The app is ad-hoc signed for local use; distributing it to other Macs requires
+Developer ID signing and notarization. No Electron or bundled browser engine.
+
+Use ⌘T to add a tab, ⌘E to edit, ⌘, for settings, ⌘1…9 to switch,
+Control-Tab to cycle, and the Tabs menu to reorder. ⌘W closes the window
+(or keeps the app in the menu bar when enabled); ⌘Q quits. Standard copy/paste,
+reload, navigation and zoom shortcuts are available in the menus.
+
+Config lives in `~/Library/Application Support/webtabs/tabs.toml` and reloads
+on edits. WebKit manages persistent profiles in its own application storage;
+`WEBTABS_DATA` selects a separate profile namespace on Mac rather than moving
+WebKit's files. Shared tabs use one profile; isolated tabs have separate
+persistent cookies/storage. Removing the last tab using an isolated session
+clears that session's website data. Start at login uses macOS Login Items.
+
+macOS supports page-created desktop notifications through a native bridge,
+including mute settings and click-to-focus. Service-worker/push notifications,
+site-specific authenticated calls, DRM, and SSO flows have not been validated.
+Camera and microphone access use WebKit/macOS permission prompts. Site icons are
+loaded into memory on Mac; Linux additionally caches them to disk. Inspector
+support is enabled by `WEBTABS_DEBUG=1` (Safari's Develop menu).
+
+### Shared implementation
+
+`src/config.rs`, `badge.rs`, `links.rs`, `favicon.rs`, and `presets.rs` are the
+single source for both platforms: TOML parsing and validation, URL normalization,
+user agents, session naming, unread parsing, link routing, favicon ranking, and
+presets. `src/lib.rs` exposes these functions to Swift through an owned JSON/C
+interface. Rust allocates responses and Swift always releases them through Rust.
+
+`src/linux/` owns GTK/WebKitGTK integration. `macos/main.swift` owns AppKit/WKWebView
+integration: controls, webview lifetimes, OS notifications, menus, profile storage,
+and login registration. Tab-view reconciliation is platform-specific because it
+owns native widgets; it does not duplicate configuration or routing rules.
+
+For a deterministic native rendering test with a separate config/profile:
+
+```sh
+WEBTABS_CONFIG="$PWD/target/smoke/tabs.toml" \
+WEBTABS_DATA="$PWD/target/smoke/profile" \
+target/release/WebTabs.app/Contents/MacOS/WebTabs --smoke-test
+```
+
+The following installation instructions and Ctrl-based shortcuts describe Linux.
 
 ## Install (Linux)
 

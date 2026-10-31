@@ -5,6 +5,10 @@ edition = "2024"
 description = "Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview"
 license = "MIT"
 
+[lib]
+name = "webtabs_core"
+crate-type = ["staticlib", "rlib"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
