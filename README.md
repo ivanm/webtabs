@@ -23,7 +23,30 @@ one when present, otherwise ad-hoc. Ad-hoc builds change identity on every
 rebuild, so macOS asks again for Keychain access to WebKit's "WebTabs WebCrypto
 Master Key". Run `scripts/macos-signing-identity.sh` once to create the local
 identity; `WEBTABS_SIGN_IDENTITY=-` forces ad-hoc. Distributing to other Macs
-needs Developer ID signing and notarization.
+needs Developer ID signing and notarization. `WEBTABS_ARCHS="arm64 x86_64"`
+builds one app for Apple Silicon and Intel; `WEBTABS_APP` sets where it goes.
+
+## Releases
+
+Pushing a tag builds both platforms on GitHub Actions and publishes a release
+with `WebTabs-macOS.zip` (Apple Silicon + Intel) and `webtabs-linux-x86_64.tar.gz`:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Actions › Release › Run workflow builds the same files as artifacts without
+publishing. The Mac app is signed with the self-signed "WebTabs Release Signing"
+identity from the `MACOS_SIGNING_P12` / `MACOS_SIGNING_PASSWORD` secrets
+(`scripts/macos-release-signing.sh` creates and stores them), so updates keep
+Keychain access. It isn't notarized: the first time you open a
+downloaded copy, macOS blocks it; allow it under System Settings › Privacy &
+Security › Open Anyway. Downloading with `gh` skips that check:
+
+```sh
+gh release download --repo ivanm/webtabs --pattern WebTabs-macOS.zip --clobber &&
+  ditto -x -k WebTabs-macOS.zip ~/Applications
+```
 
 The Mac app works like the Linux one described below: the same icon tab bar
 (unread bubbles, icon tags, `+` and the gear), right-click tab menu, middle-click

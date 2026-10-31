@@ -1,0 +1,109 @@
+# Builds WebTabs for macOS (one app for Apple Silicon and Intel) and Linux.
+# Push a tag like v0.2.0 to publish a GitHub Release with both; run it by hand
+# (Actions › Release › Run workflow) to get the builds as artifacts only.
+#
+# macOS signing uses the self-signed "WebTabs Release Signing" identity from the
+# MACOS_SIGNING_P12 (base64 .p12) and MACOS_SIGNING_PASSWORD secrets, so every
+# release keeps the same identity and Keychain access allowed once keeps working.
+# Without the secrets the app is ad-hoc signed. It is not notarized: macOS asks
+# once per download (System Settings › Privacy & Security › Open Anyway).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Signing keychain
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: |
+          if [[ -z "$P12" ]]; then
+            echo "::warning::No signing secrets; building ad-hoc signed."
+            echo "WEBTABS_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/signing.p12"
+          echo "WEBTABS_SIGN_IDENTITY=WebTabs Release Signing" >> "$GITHUB_ENV"
+      - name: Build
+        env:
+          WEBTABS_ARCHS: arm64 x86_64
+          WEBTABS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          WEBTABS_BUILD: ${{ github.run_number }}
+        run: bash scripts/build-macos.sh
+      - name: Check
+        run: |
+          APP=target/release/WebTabs.app
+          lipo -info "$APP/Contents/MacOS/WebTabs"
+          codesign --verify --strict "$APP"
+          codesign -dv "$APP" 2>&1 | grep -E "Authority|Signature"
+      - name: Package
+        run: ditto -c -k --keepParent target/release/WebTabs.app WebTabs-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebTabs-macOS
+          path: WebTabs-macOS.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK and WebKitGTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libsoup-3.0-dev
+      - name: Test
+        run: |
+          cargo test --locked
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p webtabs-linux
+          cp target/release/webtabs packaging/webtabs.desktop assets/webtabs.svg webtabs-linux/
+          tar czf webtabs-linux-x86_64.tar.gz webtabs-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webtabs-linux-x86_64
+          path: webtabs-linux-x86_64.tar.gz
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" WebTabs-macOS.zip webtabs-linux-x86_64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "WebTabs $GITHUB_REF_NAME" --generate-notes
