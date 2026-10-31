@@ -283,17 +283,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 
   private func makeStatusItem() {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    let image = NSImage(size: NSSize(width: 18, height: 16), flipped: false) { _ in
-      // The app icon's shape: three tabs over a window.
-      NSColor.black.setFill()
-      for (i, x) in [1.5, 7, 12.5].enumerated() {
-        NSColor.black.withAlphaComponent(i == 0 ? 1 : 0.5).setFill()
-        NSBezierPath(roundedRect: NSRect(x: x, y: 12, width: 4.5, height: 2.5), xRadius: 1, yRadius: 1)
-          .fill()
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+      // The app icon's mark: four chevrons making a diamond around a square.
+      NSColor.black.set()
+      let (c, r, arm): (CGFloat, CGFloat, CGFloat) = (9, 6.8, 2.7)
+      for (dx, dy) in [(0.0, 1.0), (1, 0), (0, -1), (-1, 0)] as [(CGFloat, CGFloat)] {
+        let tip = NSPoint(x: c + dx * r, y: c + dy * r)
+        let chevron = NSBezierPath()
+        chevron.move(to: NSPoint(x: tip.x + arm * (-dy - dx), y: tip.y + arm * (dx - dy)))
+        chevron.line(to: tip)
+        chevron.line(to: NSPoint(x: tip.x + arm * (dy - dx), y: tip.y + arm * (-dx - dy)))
+        chevron.lineWidth = 1.8
+        chevron.lineJoinStyle = .round
+        chevron.stroke()
       }
-      NSColor.black.setFill()
-      NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 15.5, height: 9), xRadius: 2, yRadius: 2)
-        .fill()
+      NSBezierPath(
+        roundedRect: NSRect(x: c - 2.3, y: c - 2.3, width: 4.6, height: 4.6), xRadius: 0.8,
+        yRadius: 0.8
+      ).fill()
       return true
     }
     image.isTemplate = true
@@ -398,6 +405,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     // (Pages get no clipboard read access: WebKit's default.)
     wc.preferences.javaScriptCanOpenWindowsAutomatically = true
     wc.mediaTypesRequiringUserActionForPlayback = []
+    // Video fullscreen (YouTube, native controls); off by default in WKWebView,
+    // on in Safari and WebKitGTK.
+    wc.preferences.isElementFullscreenEnabled = true
+    // No back/forward page cache (as on Linux): web apps don't need it, and it
+    // keeps whole pages (and processes) alive after sign-in redirects.
+    if wc.preferences.responds(to: NSSelectorFromString("_setUsesPageCache:")) {
+      wc.preferences.setValue(false, forKey: "usesPageCache")
+    }
     // "Inspect Element" in the page menu, as Linux enables developer extras.
     if wc.preferences.responds(to: NSSelectorFromString("_setDeveloperExtrasEnabled:")) {
       wc.preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -553,9 +568,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   /// Drops a tab's views and web process.
   private func detach(_ tv: TabView) {
     tv.titleObservation = nil
+    tv.web.navigationDelegate = nil
+    tv.web.uiDelegate = nil
     tv.web.stopLoading()
     tv.web.configuration.userContentController.removeAllScriptMessageHandlers()
     tv.web.configuration.userContentController.removeAllUserScripts()
+    // Its popups run in its web process, which goes next.
+    for popup in popups.values where popup.owner === tv { popup.window.close() }
+    // Releasing a WKWebView leaves its web process running (one kept spinning at
+    // ~50% CPU long after its tab was removed), so end it here. Forcefully: a
+    // graceful close is what got stuck. Plain `_killWebContentProcess` doesn't
+    // end it on current WebKit.
+    for name in ["_killWebContentProcessAndResetState", "_close"] {
+      let selector = NSSelectorFromString(name)
+      if tv.web.responds(to: selector) {
+        tv.web.perform(selector)
+        break
+      }
+    }
     tv.web.removeFromSuperview()
     tabStack.removeArrangedSubview(tv.button)
     tv.button.removeFromSuperview()
@@ -589,12 +619,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     menu.autoenablesItems = false
     let i = tabs.firstIndex { $0 === tv } ?? 0
     for item in [
-      ActionItem("Reload") { tv.web.reload() },
-      ActionItem("Go to Home Page") { [weak self] in self?.goHome(tv) },
-      ActionItem("Move Left", enabled: i > 0) { [weak self] in self?.moveTab(tv, -1) },
-      ActionItem("Move Right", enabled: i + 1 < tabs.count) { [weak self] in self?.moveTab(tv, 1) },
-      ActionItem("Edit…") { [weak self] in self?.editTabDialog(tv) },
-      ActionItem("Remove…") { [weak self] in self?.confirmRemove(tv) },
+      ActionItem("Reload") { [weak tv] in tv?.web.reload() },
+      ActionItem("Go to Home Page") { [weak self, weak tv] in
+        if let self, let tv { self.goHome(tv) }
+      },
+      ActionItem("Move Left", enabled: i > 0) { [weak self, weak tv] in
+        if let self, let tv { self.moveTab(tv, -1) }
+      },
+      ActionItem("Move Right", enabled: i + 1 < tabs.count) { [weak self, weak tv] in
+        if let self, let tv { self.moveTab(tv, 1) }
+      },
+      ActionItem("Edit…") { [weak self, weak tv] in
+        if let self, let tv { self.editTabDialog(tv) }
+      },
+      ActionItem("Remove…") { [weak self, weak tv] in
+        if let self, let tv { self.confirmRemove(tv) }
+      },
       .separator(),
       ActionItem("Add Tab…") { [weak self] in self?.addTabDialog() },
       ActionItem("Settings…") { [weak self] in self?.openSettings() },
@@ -1079,7 +1119,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 let notificationJS = """
   (() => {
     const post = m => window.webkit.messageHandlers.webtabs.postMessage(m);
-    const instances = new Map();
+    // A tab shows one native notification at a time, so only the newest one can
+    // be clicked or closed; older ones aren't kept around.
+    let latest = null;
     let permission = location.origin === HOME_ORIGIN ? 'granted' : 'default';
     class Notification extends EventTarget {
       static get permission() { return permission; }
@@ -1095,15 +1137,20 @@ let notificationJS = """
         this.tag = String(options.tag ?? '');
         this.onclick = this.onclose = this.onshow = this.onerror = null;
         this.id = Date.now() + '-' + Math.random().toString(36).slice(2);
-        instances.set(this.id, this);
-        if (permission === 'granted') post({op: 'notify', id: this.id, title: this.title, body: this.body});
-        setTimeout(() => instances.delete(this.id), 86400000);
+        if (permission !== 'granted') return;
+        latest = this;
+        post({op: 'notify', id: this.id, title: this.title, body: this.body});
       }
-      close() { if (instances.delete(this.id)) post({op: 'close', id: this.id}); }
+      close() {
+        if (latest !== this) return;
+        latest = null;
+        post({op: 'close', id: this.id});
+      }
     }
     window.__webtabsClick = id => {
-      const n = instances.get(id);
-      if (!n) return;
+      const n = latest;
+      if (!n || n.id !== id) return;
+      latest = null;
       const e = new Event('click');
       n.dispatchEvent(e);
       n.onclick?.call(n, e);

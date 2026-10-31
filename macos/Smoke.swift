@@ -17,12 +17,21 @@ extension App {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.pageChecks(tv) }
   }
 
-  /// WebKit DOM, Rust badges, the Linux bar layout, tab menu, reconciliation, switching.
+  /// WebKit DOM, fullscreen API, Rust badges, the Linux bar layout, tab menu,
+  /// reconciliation, switching.
   private func pageChecks(_ tv: TabView) {
-    tv.web.evaluateJavaScript("document.getElementById('editor').value + ':' + document.title") {
-      value, error in
-      guard error == nil, value as? String == "working:(3) Smoke Test" else {
+    let probe = "[document.getElementById('editor').value, document.fullscreenEnabled, document.title].join(':')"
+    tv.web.evaluateJavaScript(probe) { value, error in
+      guard error == nil, let value = value as? String, value.hasPrefix("working:") else {
         self.smokeFail("DOM")
+      }
+      guard value == "working:true:(3) Smoke Test" else { self.smokeFail("fullscreen API: \(value)") }
+      // Page cache off, as on Linux (where this WebKit has the setting).
+      let prefs = tv.web.configuration.preferences
+      if prefs.responds(to: NSSelectorFromString("_usesPageCache")),
+        prefs.value(forKey: "usesPageCache") as? Bool != false
+      {
+        self.smokeFail("page cache is on")
       }
       guard tv.badge.count == 3, tv.button.badge.text == "3", !tv.button.badge.isHidden else {
         self.smokeFail("title badge")
@@ -128,6 +137,9 @@ extension App {
     snapshot(s.window.contentView!, "settings")
     s.window.close()
     // Remove through the confirmation sheet, answering "Remove".
+    let pidKey = "_webProcessIdentifier"
+    let pid = isolated.web.responds(to: NSSelectorFromString(pidKey))
+      ? (isolated.web.value(forKey: pidKey) as? Int32 ?? 0) : 0
     confirmRemove(isolated)
     guard let alert = window.attachedSheet else { smokeFail("remove confirmation") }
     window.endSheet(alert, returnCode: .alertFirstButtonReturn)
@@ -136,6 +148,8 @@ extension App {
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
       // A removed tab must free its web view (and with it the profile).
       guard removed == nil else { self.smokeFail("removed tab's web view leaked") }
+      // ...and its web process must be gone, not left running.
+      guard pid > 0, kill(pid, 0) != 0 else { self.smokeFail("removed tab's web process \(pid) still runs") }
       self.emptyChecks(then: next)
     }
   }
