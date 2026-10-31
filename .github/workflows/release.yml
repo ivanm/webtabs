@@ -81,17 +81,25 @@ jobs:
         run: |
           cargo test --locked
           cargo clippy --all-targets --locked -- -D warnings
-      - name: Build
-        run: cargo build --release --locked
-      - name: Package
+      - name: Build and package
+        env:
+          WEBTABS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          WEBTABS_REQUIRE_DEB: "1"
+        run: bash scripts/package-linux.sh
+      - name: Check packages
         run: |
-          mkdir -p webtabs-linux
-          cp target/release/webtabs packaging/webtabs.desktop assets/webtabs.svg webtabs-linux/
-          tar czf webtabs-linux-x86_64.tar.gz webtabs-linux
+          tar tzf target/dist/webtabs-*-linux-x86_64.tar.gz
+          dpkg-deb --info target/dist/webtabs_*_amd64.deb
+          sudo apt-get install -y ./target/dist/webtabs_*_amd64.deb
+          ! ldd /usr/bin/webtabs | grep "not found"
+          (cd target/dist && sha256sum -c SHA256SUMS-linux)
       - uses: actions/upload-artifact@v4
         with:
           name: webtabs-linux-x86_64
-          path: webtabs-linux-x86_64.tar.gz
+          path: |
+            target/dist/webtabs-*.tar.gz
+            target/dist/webtabs_*.deb
+            target/dist/SHA256SUMS-linux
 
   release:
     if: github.ref_type == 'tag'
@@ -105,5 +113,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" WebTabs-macOS.zip webtabs-linux-x86_64.tar.gz \
+          gh release create "$GITHUB_REF_NAME" WebTabs-macOS.zip webtabs-*.tar.gz webtabs_*.deb \
+            SHA256SUMS-linux \
             --repo "$GITHUB_REPOSITORY" --title "WebTabs $GITHUB_REF_NAME" --generate-notes

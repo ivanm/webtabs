@@ -1,0 +1,42 @@
+# Maintainer: Ivan Mayoral <iimayoral@gmail.com>
+# Builds from the tagged source. scripts/aur-update.sh <version> sets pkgver,
+# the checksum and .SRCINFO for a new release.
+pkgname=webtabs
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ivanm/webtabs"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'libayatana-appindicator' 'glib2' 'cairo'
+         'gdk-pixbuf2' 'libgcc' 'glibc')
+makedepends=('cargo')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --bin webtabs
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/webtabs "$pkgdir/usr/bin/webtabs"
+  install -Dm644 packaging/webtabs.desktop "$pkgdir/usr/share/applications/webtabs.desktop"
+  install -Dm644 assets/webtabs.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/webtabs.png"
+}

@@ -306,7 +306,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     image.isTemplate = true
     item.button?.image = image
     item.button?.setAccessibilityLabel("WebTabs")
-    // Unread: a red dot on the icon, like Linux's webtabs-unread icon.
+    // Unread: a red dot on the icon, like Linux's webtabs-tray-unread icon.
     statusDot.wantsLayer = true
     statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
     statusDot.layer?.cornerRadius = 3.5

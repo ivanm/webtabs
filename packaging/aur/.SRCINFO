@@ -1,0 +1,23 @@
+pkgbase = webtabs
+	pkgdesc = Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/ivanm/webtabs
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = libsoup3
+	depends = libayatana-appindicator
+	depends = glib2
+	depends = cairo
+	depends = gdk-pixbuf2
+	depends = libgcc
+	depends = glibc
+	options = !lto
+	source = webtabs-0.1.0.tar.gz::https://github.com/ivanm/webtabs/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = webtabs

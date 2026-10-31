@@ -25,8 +25,8 @@ use webkit2gtk::{
 use webkit2gtk::{WebContext, WebView};
 
 const APP_ID: &str = "dev.vaan.webtabs";
-const ICON: &str = include_str!("../../assets/webtabs.svg");
-const ICON_UNREAD: &str = include_str!("../../assets/webtabs-unread.svg");
+/// App icon (the approved artwork, see assets/webtabs-macos.png), for the window.
+const ICON_PNG: &[u8] = include_bytes!("../../assets/webtabs.png");
 /// Tray mark (same as the macOS menu bar icon), light for dark panels.
 const TRAY_ICON: &str = include_str!("../../assets/webtabs-tray.svg");
 const TRAY_ICON_UNREAD: &str = include_str!("../../assets/webtabs-tray-unread.svg");
@@ -185,8 +185,13 @@ impl App {
         window.set_title("webtabs");
         window.set_default_size(1280, 860);
         let icon_dir = write_icons();
-        if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file(icon_dir.join("webtabs.svg")) {
-            window.set_icon(Some(&pixbuf));
+        match app_icons() {
+            // On the main window, and as the default for settings, dialogs and popups.
+            Ok(list) => {
+                window.set_icon_list(&list);
+                gtk::Window::set_default_icon_list(&list);
+            }
+            Err(e) => eprintln!("webtabs: app icon: {e}"),
         }
 
         // [tab][tab][tab][+] ............................ [gear]
@@ -1404,14 +1409,27 @@ fn install_css() {
     }
 }
 
-/// Icons are embedded in the binary and written out for the tray/window,
+/// The embedded app icon at the usual window-icon sizes. X11 drops a window's
+/// icon property when it gets too large, so the 512px artwork can't go as is.
+fn app_icons() -> Result<Vec<Pixbuf>, glib::Error> {
+    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+    loader.write(ICON_PNG)?;
+    loader.close()?;
+    let full = loader
+        .pixbuf()
+        .ok_or_else(|| glib::Error::new(glib::FileError::Failed, "empty icon"))?;
+    Ok([16, 32, 48, 64, 128, 256]
+        .into_iter()
+        .filter_map(|px| full.scale_simple(px, px, gtk::gdk_pixbuf::InterpType::Hyper))
+        .collect())
+}
+
+/// Tray icons are embedded in the binary and written out for the indicator,
 /// so the app works the same installed or straight from `cargo run`.
 fn write_icons() -> PathBuf {
     let dir = config::data_dir().join("icons");
     let _ = std::fs::create_dir_all(&dir);
     for (name, svg) in [
-        ("webtabs.svg", ICON),
-        ("webtabs-unread.svg", ICON_UNREAD),
         ("webtabs-tray.svg", TRAY_ICON),
         ("webtabs-tray-unread.svg", TRAY_ICON_UNREAD),
     ] {

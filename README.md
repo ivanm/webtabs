@@ -29,7 +29,10 @@ builds one app for Apple Silicon and Intel; `WEBTABS_APP` sets where it goes.
 ## Releases
 
 Pushing a tag builds both platforms on GitHub Actions and publishes a release
-with `WebTabs-macOS.zip` (Apple Silicon + Intel) and `webtabs-linux-x86_64.tar.gz`:
+with `WebTabs-macOS.zip` (Apple Silicon + Intel) and, for Linux,
+`webtabs-<version>-linux-x86_64.tar.gz`, `webtabs_<version>_amd64.deb` and
+`SHA256SUMS-linux`. `make package` builds the same Linux files locally into
+`target/dist` (the `.deb` only where `dpkg-deb` exists):
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
@@ -99,6 +102,20 @@ The following installation instructions and Ctrl-based shortcuts describe Linux.
 
 Needs `webkit2gtk-4.1`, `gtk3`, `libayatana-appindicator` (tray), and
 `gst-plugins-good`/`gst-plugins-bad`/`gst-libav` (media, calls).
+
+From a release:
+
+```sh
+# Any distro: tarball (installs into ~/.local; PREFIX=/usr/local with sudo for everyone)
+tar xzf webtabs-*-linux-x86_64.tar.gz && webtabs-*-linux-x86_64/install.sh
+#   remove: webtabs-*-linux-x86_64/install.sh --uninstall
+# Ubuntu 24.04+ / Debian 13+
+sudo apt install ./webtabs_*_amd64.deb
+# Arch: packaging/aur/PKGBUILD builds from the tagged source (makepkg -si);
+# scripts/aur-update.sh <version> bumps it, its checksum and .SRCINFO.
+```
+
+From source:
 
 ```sh
 make install      # ~/.local/bin/webtabs + desktop entry + icon
