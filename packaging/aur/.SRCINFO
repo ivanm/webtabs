@@ -1,6 +1,6 @@
 pkgbase = webtabs
 	pkgdesc = Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview
-	pkgver = 0.2.0
+	pkgver = 0.2.1
 	pkgrel = 1
 	url = https://github.com/ivanm/webtabs
 	arch = x86_64
@@ -17,7 +17,7 @@ pkgbase = webtabs
 	depends = libgcc
 	depends = glibc
 	options = !lto
-	source = webtabs-0.2.0.tar.gz::https://github.com/ivanm/webtabs/archive/refs/tags/v0.2.0.tar.gz
+	source = webtabs-0.2.1.tar.gz::https://github.com/ivanm/webtabs/archive/refs/tags/v0.2.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = webtabs
