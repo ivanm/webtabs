@@ -1,0 +1,27 @@
+[package]
+name = "webtabs"
+version = "0.1.0"
+edition = "2024"
+description = "Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+url = "2"
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+libappindicator = "0.9"
+soup = { package = "soup3", version = "0.5" }
+javascriptcore = { package = "javascriptcore-rs", version = "1.1" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
