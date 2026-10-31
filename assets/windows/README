@@ -1,0 +1,11 @@
+Windows resources, embedded into webtabs.exe by build.rs.
+
+The icons are generated from the approved artwork (assets/webtabs-macos.png) with
+ImageMagick:
+
+  magick assets/webtabs-macos.png -define icon:auto-resize=256,64,48,40,32,24,20,16 \
+    assets/windows/webtabs.ico
+  magick assets/webtabs-macos.png -resize 256x256 \
+    \( -size 256x256 xc:none -fill '#e5484d' -stroke white -strokewidth 14 \
+       -draw 'circle 196,60 196,8' \) -composite \
+    -define icon:auto-resize=256,64,48,32,24,20,16 assets/windows/webtabs-unread.ico

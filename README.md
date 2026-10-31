@@ -5,6 +5,29 @@ one small native window. No account, no store, no Electron.
 
 - **Linux:** Rust + GTK3 + WebKitGTK (the system webview). About 1–2 MB binary.
 - **macOS 14+:** native AppKit + WKWebView, linked to the same Rust core as Linux.
+- **Windows 11 (prototype):** Rust + Win32 + WebView2 (`src/windows/`), same core. About 1.5 MB.
+
+## Build and run on Windows (prototype)
+
+Requires stable Rust (`x86_64-pc-windows-msvc`), the Visual Studio 2022 Build
+Tools' C++ x64 tools (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`) and a
+Windows SDK (headers/libs and `rc.exe`, which embeds the icon and manifest). The
+WebView2 Runtime ships with Windows 11; the loader is linked statically.
+
+```powershell
+cargo build --release      # target\release\webtabs.exe
+target\release\webtabs.exe # --hidden starts in the tray
+```
+
+Config lives in `%APPDATA%\webtabs\tabs.toml`, WebView2 profiles in
+`%LOCALAPPDATA%\webtabs\WebView2` (one `shared` profile plus one per isolated
+session). The prototype has the icon tab bar with unread bubbles and tags, the
+total in the title, link routing, isolated sessions, notifications (shown as
+Windows toasts through the tray icon; clicking one opens the tab), tray icon
+with unread state, close-to-tray and hot reload of `tabs.toml`. There is no
+add/edit dialog or settings window yet: `+` offers the presets, the gear and the
+tray menu hold the switches and open `tabs.toml` in Notepad. `WEBTABS_DEBUG=1`
+traces routing and notifications to stderr.
 
 ## Build and run on macOS
 

@@ -2,7 +2,8 @@
 //!
 //! Location: `$WEBTABS_CONFIG` or `<config_dir>/webtabs/tabs.toml`
 //! (`~/.config/webtabs/tabs.toml` on Linux,
-//! `~/Library/Application Support/webtabs/tabs.toml` on macOS).
+//! `~/Library/Application Support/webtabs/tabs.toml` on macOS,
+//! `%APPDATA%\webtabs\tabs.toml` on Windows).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -387,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_keeps_symlinks() {
         let dir = std::env::temp_dir().join(format!("webtabs-link-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
