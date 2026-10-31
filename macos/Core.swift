@@ -101,6 +101,7 @@ struct Config: Codable {
   var tray = true
   var closeToTray = true
   var unreadInTitle = true
+  var unreadInDock = true
   var userAgent: String?
   var tabs: [Tab] = []
 
@@ -108,6 +109,7 @@ struct Config: Codable {
     case notifications, tray
     case closeToTray = "close_to_tray"
     case unreadInTitle = "unread_in_title"
+    case unreadInDock = "unread_in_dock"
     case userAgent = "user_agent"
     case tabs = "tab"
   }

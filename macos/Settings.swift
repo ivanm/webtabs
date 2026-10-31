@@ -10,6 +10,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
   let list = NSStackView()
   private var switches: [(row: SwitchRow, get: (Config) -> Bool)] = []
   private(set) var closeRow: SwitchRow!
+  private(set) var dockRow: SwitchRow!
+  private var notificationsRow: SwitchRow!
+  private static let dockSubtitle = "Number of unread messages on the WebTabs icon"
+  /// Re-checks macOS permissions when the user comes back from System Settings.
+  private var activation: NSObjectProtocol?
 
   init(app: App) {
     self.app = app
@@ -58,10 +63,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
       general.add(row)
       return row
     }
-    _ = option("Show notifications", "Notifications from your tabs", \.notifications)
+    notificationsRow = option("Show notifications", "Notifications from your tabs", \.notifications)
     _ = option("Show icon in menu bar", "Unread indicator and quick menu in the menu bar", \.tray)
     closeRow = option("Close to menu bar", "Closing the window keeps WebTabs running", \.closeToTray)
     _ = option("Unread count in window title", "e.g. “WebTabs (5)”", \.unreadInTitle)
+    dockRow = option("Unread count on Dock icon", Self.dockSubtitle, \.unreadInDock)
 
     list.orientation = .vertical
     list.alignment = .centerX
@@ -116,6 +122,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     tabsGroup.setContentHuggingPriority(.defaultLow, for: .vertical)
     optionsChanged()
     refresh()
+    activation = NotificationCenter.default.addObserver(
+      forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { [weak self] _ in self?.optionsChanged() }
   }
 
   func show() {
@@ -124,6 +133,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
   }
 
   func windowWillClose(_ notification: Notification) {
+    if let activation { NotificationCenter.default.removeObserver(activation) }
     if app?.settingsWindow === self { app?.settingsWindow = nil }
   }
 
@@ -133,6 +143,23 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     for (row, get) in switches { row.toggle.state = get(app.config) ? .on : .off }
     // Closing to a menu bar icon that isn't there would make the app unreachable.
     closeRow.isEnabled = app.config.tray
+    // macOS can block both, whatever the switches say: point at the fix.
+    app.notificationPermissions { [weak self] alerts, badges in
+      guard let self, let app = self.app else { return }
+      let open: () -> Void = { [weak app] in app?.openNotificationSettings() }
+      let link = "Open Notification Settings…"
+      if app.config.notifications && !alerts {
+        self.notificationsRow.setWarning(
+          "Notifications are off for WebTabs in System Settings", link: link, open)
+      } else {
+        self.notificationsRow.setWarning(nil)
+      }
+      if app.config.unreadInDock && !badges {
+        self.dockRow.setWarning("Badges are off for WebTabs in System Settings", link: link, open)
+      } else {
+        self.dockRow.setWarning(nil)
+      }
+    }
   }
 
   /// The list is rebuilt from App state after every change; App calls this too
@@ -297,6 +324,9 @@ final class SwitchRow: NSView {
   let toggle = NSSwitch()
   private let title: NSTextField
   private let subtitle: NSTextField
+  private let subtitleText: String
+  private let link = NSButton(title: "", target: nil, action: nil)
+  private var linkAction: (() -> Void)?
   private let apply: (Bool) -> Bool
   var isEnabled = true {
     didSet {
@@ -306,9 +336,19 @@ final class SwitchRow: NSView {
     }
   }
 
+  /// A problem to show instead of the subtitle, with a link that fixes it.
+  func setWarning(_ text: String?, link label: String = "", _ action: (() -> Void)? = nil) {
+    subtitle.stringValue = text ?? subtitleText
+    subtitle.textColor = text == nil ? .secondaryLabelColor : .systemOrange
+    link.title = label
+    link.isHidden = text == nil || action == nil
+    linkAction = action
+  }
+
   init(_ title: String, _ subtitle: String, on: Bool, apply: @escaping (Bool) -> Bool) {
     self.title = NSTextField(labelWithString: title)
     self.subtitle = NSTextField(labelWithString: subtitle)
+    subtitleText = subtitle
     self.apply = apply
     super.init(frame: .zero)
     self.subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -317,7 +357,13 @@ final class SwitchRow: NSView {
     toggle.target = self
     toggle.action = #selector(changed)
     toggle.setAccessibilityLabel(title)
-    let text = NSStackView(views: [self.title, self.subtitle])
+    link.isBordered = false
+    link.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+    link.contentTintColor = .linkColor
+    link.target = self
+    link.action = #selector(followLink)
+    link.isHidden = true
+    let text = NSStackView(views: [self.title, self.subtitle, link])
     text.orientation = .vertical
     text.alignment = .leading
     text.spacing = 2
@@ -333,6 +379,8 @@ final class SwitchRow: NSView {
     ])
   }
   required init?(coder: NSCoder) { fatalError() }
+
+  @objc private func followLink() { linkAction?() }
 
   @objc private func changed() {
     let on = toggle.state == .on

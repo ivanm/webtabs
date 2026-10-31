@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import WebKit
 
 /// `--smoke-test`: native checks against generated pages, no real sites or
@@ -52,7 +53,9 @@ extension App {
         self.emptyState.isHidden
       else { self.smokeFail("tab switch has no viewport") }
       self.snapshot(self.window.contentView!, "main")
-      self.addTabChecks { self.profileCheck(existing.configuration.websiteDataStore) }
+      self.addTabChecks {
+        self.reportNotificationSettings { self.profileCheck(existing.configuration.websiteDataStore) }
+      }
     }
   }
 
@@ -133,9 +136,20 @@ extension App {
     guard status == nil, !s.closeRow.isEnabled else { smokeFail("tray off") }
     updateOptions { $0.tray = true }
     guard status != nil, s.closeRow.isEnabled else { smokeFail("tray on") }
-    s.window.contentView?.layoutSubtreeIfNeeded()
-    snapshot(s.window.contentView!, "settings")
-    s.window.close()
+    updateOptions { $0.unreadInDock = false }
+    guard NSApp.dockTile.badgeLabel == nil else { smokeFail("Dock count still shown") }
+    updateOptions { $0.unreadInDock = true }
+    guard NSApp.dockTile.badgeLabel != nil else { smokeFail("Dock count missing") }
+    // The badge-permission warning arrives asynchronously.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+      s.window.contentView?.layoutSubtreeIfNeeded()
+      self.snapshot(s.window.contentView!, "settings")
+      s.window.close()
+      self.removeChecks(isolated, then: next)
+    }
+  }
+
+  private func removeChecks(_ isolated: TabView, then next: @escaping () -> Void) {
     // Remove through the confirmation sheet, answering "Remove".
     let pidKey = "_webProcessIdentifier"
     let pid = isolated.web.responds(to: NSSelectorFromString(pidKey))
@@ -170,6 +184,19 @@ extension App {
         self.smokeFail("isolated session not deleted")
       }
       next()
+    }
+  }
+
+  /// What macOS lets this build do; a Dock count needs the badge permission.
+  private func reportNotificationSettings(then next: @escaping () -> Void) {
+    UNUserNotificationCenter.current().getNotificationSettings { s in
+      let status = ["not asked", "denied", "allowed", "provisional", "ephemeral"]
+      let setting = ["n/a", "off", "on"]
+      print(
+        "SMOKE INFO: notifications \(status[safe: s.authorizationStatus.rawValue]), "
+          + "alerts \(setting[safe: s.alertSetting.rawValue]), "
+          + "badges \(setting[safe: s.badgeSetting.rawValue])")
+      DispatchQueue.main.async(execute: next)
     }
   }
 
@@ -221,4 +248,8 @@ extension App {
     try? out.representation(using: .png, properties: [:])?.write(
       to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
   }
+}
+
+extension Array where Element == String {
+  subscript(safe i: Int) -> String { indices.contains(i) ? self[i] : "\(i)" }
 }

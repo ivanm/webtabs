@@ -32,6 +32,7 @@ const HEADER: &str = "\
 # tray            = true    # show the tray icon
 # close_to_tray   = true    # closing the window keeps the app running in the tray
 # unread_in_title = true    # total unread count in the window title
+# unread_in_dock  = true    # unread count on the Dock icon (macOS)
 # user_agent      = \"...\"   # global user-agent override (default: Safari)
 #
 # [[tab]]
@@ -54,6 +55,9 @@ pub struct Config {
     pub close_to_tray: bool,
     #[serde(default = "default_true")]
     pub unread_in_title: bool,
+    /// macOS only: unread count on the Dock icon. Ignored on Linux.
+    #[serde(default = "default_true")]
+    pub unread_in_dock: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     #[serde(default, rename = "tab")]
@@ -94,6 +98,7 @@ impl Default for Config {
             tray: true,
             close_to_tray: true,
             unread_in_title: true,
+            unread_in_dock: true,
             user_agent: None,
             tabs: vec![
                 tab("WhatsApp", "https://web.whatsapp.com"),
@@ -333,6 +338,10 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.notifications && cfg.close_to_tray && cfg.unread_in_title);
+        assert!(cfg.unread_in_dock);
+        let off = Config::parse("unread_in_dock = false\n").unwrap();
+        assert!(!off.unread_in_dock);
+        assert_eq!(Config::parse(&off.to_toml()).unwrap(), off);
         assert!(!cfg.tray);
         assert!(!cfg.tabs[0].notifications);
         assert!(cfg.tabs[1].notifications);

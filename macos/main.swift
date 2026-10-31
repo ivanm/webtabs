@@ -122,7 +122,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     applyOptions()
     loadTabsProgressively()
     watchConfig()
-    if config.notifications && !smoke { requestNotifications() }
+    requestNotifications()
     let hidden = CommandLine.arguments.contains("--hidden") || launchedAsLoginItem()
     if !(hidden && status != nil) { showWindow() }
     if smoke {
@@ -347,9 +347,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 
   /// Changes app-wide options from the settings window and persists them.
   func updateOptions(_ change: (inout Config) -> Void) {
-    let notificationsWereOn = config.notifications
+    let before = config
     change(&config)
-    if config.notifications && !notificationsWereOn { requestNotifications() }
+    if (config.notifications && !before.notifications)
+      || (config.unreadInDock && !before.unreadInDock)
+    {
+      requestNotifications()
+    }
     applyOptions()
     save()
   }
@@ -720,7 +724,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     let total = tabs.reduce(0) { $0 + $1.badge.count }
     let any = tabs.contains { $0.badge.unread }
     window.title = total > 0 && config.unreadInTitle ? "WebTabs (\(total))" : "WebTabs"
-    NSApp.dockTile.badgeLabel = total > 0 ? String(total) : any ? "•" : nil
+    NSApp.dockTile.badgeLabel =
+      !config.unreadInDock ? nil : total > 0 ? String(total) : any ? "•" : nil
     statusDot.isHidden = !any
     status?.button?.setAccessibilityLabel(any ? "WebTabs, unread messages" : "WebTabs")
     // Linux sets the urgency hint; here the Dock icon bounces once.
@@ -728,9 +733,35 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     lastUnread = total
   }
 
+  /// Asks macOS once for what the options need. The Dock count is a badge
+  /// permission: macOS hides it unless WebTabs may badge its icon.
   func requestNotifications() {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, error in
+    var options: UNAuthorizationOptions = []
+    if config.notifications { options.formUnion([.alert, .sound]) }
+    if config.unreadInDock { options.insert(.badge) }
+    guard !options.isEmpty, !smoke else { return }
+    UNUserNotificationCenter.current().requestAuthorization(options: options) { _, error in
       if let error { NSLog("webtabs: notifications: %@", error.localizedDescription) }
+      DispatchQueue.main.async { self.settingsWindow?.optionsChanged() }
+    }
+  }
+
+  /// Whether macOS currently lets WebTabs show alerts and badge its Dock icon.
+  func notificationPermissions(_ done: @escaping (_ alerts: Bool, _ badges: Bool) -> Void) {
+    UNUserNotificationCenter.current().getNotificationSettings { s in
+      let denied = s.authorizationStatus == .denied
+      let (alerts, badges) = (!denied && s.alertSetting != .disabled, !denied && s.badgeSetting != .disabled)
+      DispatchQueue.main.async { done(alerts, badges) }
+    }
+  }
+
+  /// System Settings › Notifications › WebTabs.
+  func openNotificationSettings() {
+    let id = Bundle.main.bundleIdentifier ?? ""
+    if let url = URL(
+      string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)")
+    {
+      NSWorkspace.shared.open(url)
     }
   }
 

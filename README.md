@@ -30,7 +30,9 @@ The Mac app works like the Linux one described below: the same icon tab bar
 to reload, the add/edit sheet with presets and Advanced, and the settings window
 with its tab manager. Shortcuts use ⌘ instead of Ctrl (⌘T, ⌘E, ⌘,, ⌘1…9,
 ⌃Tab or ⇧⌘] / ⇧⌘[, ⌘R, ⌘[ / ⌘], ⇧⌘H for the tab's home page); the menu bar icon
-replaces the tray. Downloads go to ~/Downloads with a notification.
+replaces the tray. Downloads go to ~/Downloads with a notification. The Dock icon
+shows the unread count (Settings › Unread count on Dock icon); macOS only shows it,
+and notifications, when WebTabs is allowed them in System Settings › Notifications.
 
 Config lives in `~/Library/Application Support/webtabs/tabs.toml`, site icons in
 `~/Library/Application Support/webtabs/favicons`. WebKit keeps the browsing
@@ -106,6 +108,7 @@ notifications = true
 tray = true
 close_to_tray = true
 unread_in_title = true
+unread_in_dock = true          # macOS: unread count on the Dock icon
 # user_agent = "..."            # global override (default: Safari)
 
 [[tab]]
