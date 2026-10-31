@@ -31,8 +31,10 @@ builds one app for Apple Silicon and Intel; `WEBTABS_APP` sets where it goes.
 Pushing a tag builds both platforms on GitHub Actions and publishes a release
 with `WebTabs-macOS.zip` (Apple Silicon + Intel) and, for Linux,
 `webtabs-<version>-linux-x86_64.tar.gz`, `webtabs_<version>_amd64.deb` and
-`SHA256SUMS-linux`. `make package` builds the same Linux files locally into
-`target/dist` (the `.deb` only where `dpkg-deb` exists):
+`SHA256SUMS-linux`, plus the Arch package `webtabs-<version>-1-x86_64.pkg.tar.zst`
+and `SHA256SUMS-arch`. `make package` builds the Linux files locally into
+`target/dist` (the `.deb` only where `dpkg-deb` exists); `make package-arch` builds
+the Arch package from the current commit:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
@@ -111,7 +113,9 @@ tar xzf webtabs-*-linux-x86_64.tar.gz && webtabs-*-linux-x86_64/install.sh
 #   remove: webtabs-*-linux-x86_64/install.sh --uninstall
 # Ubuntu 24.04+ / Debian 13+
 sudo apt install ./webtabs_*_amd64.deb
-# Arch: packaging/aur/PKGBUILD builds from the tagged source (makepkg -si);
+# Arch (pacman tracks it, so updates and removal are plain pacman)
+sudo pacman -U webtabs-*-x86_64.pkg.tar.zst
+# AUR: packaging/aur/PKGBUILD builds from the tagged source (makepkg -si);
 # scripts/aur-update.sh <version> bumps it, its checksum and .SRCINFO.
 ```
 

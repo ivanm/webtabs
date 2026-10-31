@@ -1,4 +1,5 @@
-# Builds WebTabs for macOS (one app for Apple Silicon and Intel) and Linux.
+# Builds WebTabs for macOS (one app for Apple Silicon and Intel) and Linux
+# (tarball + .deb on Ubuntu, a pacman package on Arch).
 # Push a tag like v0.2.0 to publish a GitHub Release with both; run it by hand
 # (Actions › Release › Run workflow) to get the builds as artifacts only.
 #
@@ -101,9 +102,39 @@ jobs:
             target/dist/webtabs_*.deb
             target/dist/SHA256SUMS-linux
 
+  arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git cargo webkit2gtk-4.1 gtk3 libsoup3 \
+            libayatana-appindicator
+          useradd -m builder
+          git config --system --add safe.directory '*'
+      - uses: actions/checkout@v4
+      - name: Build package
+        env:
+          WEBTABS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          chown -R builder .
+          su builder -c "WEBTABS_VERSION='$WEBTABS_VERSION' bash scripts/package-arch.sh"
+      - name: Check package
+        run: |
+          pacman -U --noconfirm target/dist/webtabs-*.pkg.tar.zst
+          pacman -Ql webtabs
+          ! ldd /usr/bin/webtabs | grep "not found"
+          (cd target/dist && sha256sum -c SHA256SUMS-arch)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webtabs-arch-x86_64
+          path: |
+            target/dist/webtabs-*.pkg.tar.zst
+            target/dist/SHA256SUMS-arch
+
   release:
     if: github.ref_type == 'tag'
-    needs: [macos, linux]
+    needs: [macos, linux, arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -114,5 +145,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" WebTabs-macOS.zip webtabs-*.tar.gz webtabs_*.deb \
-            SHA256SUMS-linux \
+            SHA256SUMS-linux webtabs-*.pkg.tar.zst SHA256SUMS-arch \
             --repo "$GITHUB_REPOSITORY" --title "WebTabs $GITHUB_REF_NAME" --generate-notes

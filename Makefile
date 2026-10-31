@@ -7,7 +7,7 @@ AUTOSTART = $(HOME)/.config/autostart
 CARGO = bash scripts/cargo.sh
 UNAME_S := $(shell uname -s)
 
-.PHONY: build test install uninstall autostart run package
+.PHONY: build test install uninstall autostart run package package-arch
 
 build:
 	$(if $(filter Darwin,$(UNAME_S)),bash scripts/build-macos.sh,$(CARGO) build --release --locked)
@@ -55,3 +55,7 @@ ifeq ($(UNAME_S),Darwin)
 else
 	bash scripts/package-linux.sh
 endif
+
+# Arch package from the current commit (target/dist/*.pkg.tar.zst).
+package-arch:
+	bash scripts/package-arch.sh
