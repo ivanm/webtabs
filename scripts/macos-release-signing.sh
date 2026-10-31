@@ -34,5 +34,5 @@ base64 -i "$TMP/identity.p12" | gh secret set MACOS_SIGNING_P12 --repo "$REPO"
 printf %s "$PASS" | gh secret set MACOS_SIGNING_PASSWORD --repo "$REPO"
 
 openssl x509 -in "$TMP/cert.pem" -noout -subject -enddate
-gh secret list --repo "$REPO"
+GH_PAGER=cat gh secret list --repo "$REPO"
 echo "Stored $NAME in $REPO's secrets."
