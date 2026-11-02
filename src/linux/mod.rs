@@ -53,13 +53,18 @@ const CSS: &str = "
 
 pub fn run() -> std::process::ExitCode {
     let start_hidden = std::env::args().any(|a| a == "--hidden");
-    // WebKitGTK's DMA-BUF renderer can't allocate GBM buffers on the proprietary
-    // NVIDIA driver and every page renders blank. Respect an explicit user setting.
+    // WebKitGTK's DMA-BUF renderer can't share GBM buffers with the UI on the
+    // NVIDIA driver ("Failed to create GBM buffer") and every page renders blank.
+    // Disabling the renderer fixes that but drops to CPU-only painting (policy
+    // "never": WhatsApp scrolls at ~28 fps on an RTX 3080). Forcing shared-memory
+    // buffers keeps GPU rendering in the web process and only copies finished
+    // frames (60 fps). An explicit user setting of either variable wins.
     if std::path::Path::new("/proc/driver/nvidia").exists()
         && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+        && std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none()
     {
         // SAFETY: still single-threaded; GTK and the web processes are not started yet.
-        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+        unsafe { std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1") };
     }
     glib::set_prgname(Some("webtabs"));
     glib::set_application_name("webtabs");

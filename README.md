@@ -255,5 +255,7 @@ cargo run
 Environment overrides (handy for testing): `WEBTABS_CONFIG=path/to/tabs.toml`,
 `WEBTABS_DATA=dir`. `WEBTABS_DEBUG=1` prints every page's JS console to stdout.
 
-On NVIDIA's proprietary driver the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`
-itself; without it WebKitGTK renders blank pages.
+On NVIDIA's driver the app sets `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` itself:
+WebKitGTK's default renderer shows blank pages there, and this keeps pages
+GPU-rendered (only the finished frame is copied). Setting
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` instead also works but paints on the CPU.
