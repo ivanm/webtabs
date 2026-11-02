@@ -14,9 +14,7 @@ No Electron, no account, no store.
 
 [Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Shortcuts](#shortcuts) · [Development](docs/DEVELOPMENT.md)
 
-<!-- Screenshot (macOS): add docs/screenshot-macos.png, then uncomment.
-<img src="docs/screenshot-macos.png" alt="WebTabs on macOS" width="760">
--->
+<img src="docs/screenshot-macos.png" alt="WebTabs on macOS: WhatsApp, Slack, Gmail, Calendar and Telegram as tabs with unread badges" width="760">
 
 </div>
 
