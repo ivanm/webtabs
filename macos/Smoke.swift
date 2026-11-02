@@ -48,10 +48,19 @@ extension App {
       let existing = tv.web
       self.reconcile(self.config)
       guard self.current?.web === existing else { self.smokeFail("reconcile discarded a live tab") }
+      // Dropped files go to the tab you see: the first tab sits lowest in the
+      // stack, under the hidden ones.
+      self.select(tv)
+      guard self.dropTarget().map({ $0 === existing }) ?? true else {
+        self.smokeFail("files dropped on the first tab go to a hidden one")
+      }
       self.nextTab()
       guard let shown = self.current?.web, shown.frame.width > 0, !shown.isHidden,
         self.emptyState.isHidden
       else { self.smokeFail("tab switch has no viewport") }
+      guard self.dropTarget().map({ $0 === shown }) ?? true else {
+        self.smokeFail("files dropped after switching go to a hidden tab")
+      }
       self.snapshot(self.window.contentView!, "main")
       self.addTabChecks {
         self.reportNotificationSettings { self.profileCheck(existing.configuration.websiteDataStore) }
@@ -220,6 +229,21 @@ extension App {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
       }
     }
+  }
+
+  /// The web view AppKit would hand a file dropped mid-page to (nil when this
+  /// AppKit lacks the lookup).
+  func dropTarget() -> WKWebView? {
+    let sel = NSSelectorFromString("_hitTest:dragTypes:")
+    guard let frame = window.contentView?.superview, frame.responds(to: sel) else { return nil }
+    typealias HitTest = @convention(c) (AnyObject, Selector, UnsafeMutablePointer<CGPoint>, NSSet)
+      -> AnyObject?
+    let hit = unsafeBitCast(frame.method(for: sel), to: HitTest.self)
+    var point = content.convert(NSPoint(x: content.bounds.midX, y: content.bounds.midY), to: nil)
+    let types = NSSet(array: [NSPasteboard.PasteboardType.fileURL.rawValue])
+    var view = hit(frame, sel, &point, types) as? NSView
+    while let v = view, !(v is WKWebView) { view = v.superview }
+    return view as? WKWebView
   }
 
   func snapshot(_ view: NSView, _ name: String) {

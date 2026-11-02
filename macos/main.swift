@@ -510,6 +510,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       t.button.isActive = t === tv
       t.web.isHidden = t !== tv
     }
+    // AppKit hands dropped files to the topmost web view even when it's hidden,
+    // so the current tab's goes on top. Reordering keeps every view in the
+    // window, so background tabs carry on as before.
+    content.sortSubviews(
+      { a, b, ctx in
+        let front = Unmanaged<NSView>.fromOpaque(ctx!).takeUnretainedValue()
+        return a === front ? .orderedDescending : b === front ? .orderedAscending : .orderedSame
+      }, context: Unmanaged.passUnretained(tv.web).toOpaque())
     emptyState.isHidden = true
     load(tv)
     tv.button.scrollToVisible(tv.button.bounds)
