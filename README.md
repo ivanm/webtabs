@@ -1,264 +1,182 @@
-# webtabs
+<div align="center">
 
-Your web apps (WhatsApp, Gmail, Calendar, Slack, internal dashboards) as tabs in
-one small native window. No account, no store, no Electron.
+<img src="assets/webtabs.png" alt="WebTabs icon" width="96" height="96">
 
-- **Linux:** Rust + GTK3 + WebKitGTK (the system webview). About 1–2 MB binary.
-- **macOS 14+:** native AppKit + WKWebView, linked to the same Rust core as Linux.
-- **Windows 11 (prototype):** Rust + Win32 + WebView2 (`src/windows/`), same core. About 1.5 MB.
+# WebTabs
 
-## Build and run on Windows (prototype)
+**Your web apps in one tiny native window.**
 
-Requires stable Rust (`x86_64-pc-windows-msvc`), the Visual Studio 2022 Build
-Tools' C++ x64 tools (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`) and a
-Windows SDK (headers/libs and `rc.exe`, which embeds the icon and manifest). The
-WebView2 Runtime ships with Windows 11; the loader is linked statically.
+WhatsApp, Slack, Gmail, Calendar, Telegram or your own dashboards, side by side as
+tabs, with unread counts, real notifications and a tray icon.
+No Electron, no account, no store.
 
-```powershell
-cargo build --release      # target\release\webtabs.exe
-target\release\webtabs.exe # --hidden starts in the tray
-```
+![Linux](https://img.shields.io/badge/Linux-GTK%20%2B%20WebKit-333?logo=linux&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-14%2B-333?logo=apple&logoColor=white) ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-333?logo=windows&logoColor=white) ![Rust](https://img.shields.io/badge/core-Rust-333?logo=rust&logoColor=white)
 
-Releases include `WebTabs-<version>-windows-x64.msi`, a per-user installer
-(`%LOCALAPPDATA%\Programs\WebTabs`, Start menu shortcut, no admin prompt; it
-asks for the WebView2 Runtime on a Windows 10 PC without it), and a portable
-`webtabs-<version>-windows-x64.zip`. Both are unsigned, so SmartScreen warns the
-first time (More info › Run anyway). Uninstalling keeps your tabs and logins.
-Build them locally with WiX 5 (`dotnet tool install --global wix --version 5.0.2`):
+[Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Shortcuts](#shortcuts) · [Development](docs/DEVELOPMENT.md)
 
-```powershell
-pwsh scripts\package-windows.ps1     # target\dist: .msi, .zip, SHA256SUMS-windows
-pwsh scripts\check-windows-msi.ps1   # installs, checks and uninstalls the MSI
-```
+<!-- Screenshot (macOS): add docs/screenshot-macos.png, then uncomment.
+<img src="docs/screenshot-macos.png" alt="WebTabs on macOS" width="760">
+-->
 
-Config lives in `%APPDATA%\webtabs\tabs.toml`, WebView2 profiles in
-`%LOCALAPPDATA%\webtabs\WebView2` (one `shared` profile plus one per isolated
-session). The prototype has the icon tab bar with unread bubbles and tags, the
-total in the title, link routing, isolated sessions, notifications (shown as
-Windows toasts through the tray icon; clicking one opens the tab), tray icon
-with unread state, close-to-tray and hot reload of `tabs.toml`. The settings
-window (gear, Ctrl+,) and the add/edit tab form (`+`, Ctrl+T, a tab's Edit…)
-match Linux's; they are a local page in WebView2 (`src/windows/panel.html`), the
-rules stay in Rust. "Start with computer" adds a `webtabs` value under
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which Task Manager's
-Startup tab also lists. `WEBTABS_DEBUG=1` traces routing and notifications to
-stderr.
+</div>
 
-## Build and run on macOS
+## Features
 
-Requires Xcode (or the Command Line Tools with the Swift compiler) and stable Rust.
+- **Tiny and native.** A few megabytes on the web engine your system already has
+  (WebKit on Linux and macOS, WebView2 on Windows), not a bundled Chromium.
+- **Unread at a glance.** Each tab's icon shows its count; the total shows in the
+  window title, the tray icon and, on macOS and supporting Linux docks, the app icon.
+- **Real notifications.** Messages become desktop notifications; clicking one
+  opens the right tab and jumps to that chat or email. Mute any tab you like.
+- **Two accounts, one service.** *Isolated login* gives a tab its own cookies, so
+  you can run two Slack or Gmail accounts side by side.
+- **Lives in the tray.** Close the window and it keeps running; start it with
+  your computer, hidden, so messages are there when you need them.
+- **Safe by default.** Links to other sites open in your browser, sign-ins stay
+  in the app, and pages only get notifications, camera and mic for their own
+  site. Pages can't read your clipboard or open apps on their own.
+- **One plain config file.** Everything lives in `tabs.toml`. Edit it by hand and
+  the app picks up the changes live, without logging you out.
 
-```sh
-make build       # target/release/WebTabs.app, native to this Mac's architecture
-open target/release/WebTabs.app
-make install     # optional: copy to ~/Applications/WebTabs.app
-make test        # shared Rust tests + clippy (rustup component add clippy)
-```
+## Download
 
-The build also detects a project-local Rust installation at `target/toolchain`.
-It signs with an "Apple Development" identity or the local "WebTabs Local Signing"
-one when present, otherwise ad-hoc. Ad-hoc builds change identity on every
-rebuild, so macOS asks again for Keychain access to WebKit's "WebTabs WebCrypto
-Master Key". Run `scripts/macos-signing-identity.sh` once to create the local
-identity; `WEBTABS_SIGN_IDENTITY=-` forces ad-hoc. Distributing to other Macs
-needs Developer ID signing and notarization. `WEBTABS_ARCHS="arm64 x86_64"`
-builds one app for Apple Silicon and Intel; `WEBTABS_APP` sets where it goes.
+Get the latest version from the [Releases page](https://github.com/ivanm/webtabs/releases/latest).
 
-## Releases
+| Platform | File | Install |
+|---|---|---|
+| **macOS 14+** (Apple Silicon, Intel) | `WebTabs-macOS.zip` | Unzip, move `WebTabs.app` to Applications |
+| **Windows 10 22H2+ / 11** | `WebTabs-<version>-windows-x64.msi` | Double-click; installs for you only, no admin |
+| | `webtabs-<version>-windows-x64.zip` | Portable: unzip and run `webtabs.exe` |
+| **Ubuntu 24.04+ / Debian 13+** | `webtabs_<version>_amd64.deb` | `sudo apt install ./webtabs_*_amd64.deb` |
+| **Arch Linux** | `webtabs-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U webtabs-*.pkg.tar.zst` |
+| **Any Linux** (x86_64) | `webtabs-<version>-linux-x86_64.tar.gz` | `tar xzf webtabs-*.tar.gz && webtabs-*/install.sh` |
 
-Pushing a tag builds both platforms on GitHub Actions and publishes a release
-with `WebTabs-macOS.zip` (Apple Silicon + Intel) and, for Linux,
-`webtabs-<version>-linux-x86_64.tar.gz`, `webtabs_<version>_amd64.deb` and
-`SHA256SUMS-linux`, plus the Arch package `webtabs-<version>-1-x86_64.pkg.tar.zst`
-and `SHA256SUMS-arch`, and for Windows `WebTabs-<version>-windows-x64.msi`,
-`webtabs-<version>-windows-x64.zip` and `SHA256SUMS-windows`. `make package` builds the Linux files locally into
-`target/dist` (the `.deb` only where `dpkg-deb` exists); `make package-arch` builds
-the Arch package from the current commit:
+Each release lists SHA-256 checksums (`SHA256SUMS-*`). With the GitHub CLI:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+gh release download --repo ivanm/webtabs --pattern 'WebTabs-macOS.zip'
 ```
 
-Actions › Release › Run workflow builds the same files as artifacts without
-publishing. The Mac app is signed with the self-signed "WebTabs Release Signing"
-identity from the `MACOS_SIGNING_P12` / `MACOS_SIGNING_PASSWORD` secrets
-(`scripts/macos-release-signing.sh` creates and stores them), so updates keep
-Keychain access. It isn't notarized: the first time you open a
-downloaded copy, macOS blocks it; allow it under System Settings › Privacy &
-Security › Open Anyway. Downloading with `gh` skips that check:
+<details>
+<summary><b>First launch: macOS and Windows warnings</b></summary>
 
-```sh
-gh release download --repo ivanm/webtabs --pattern WebTabs-macOS.zip --clobber &&
-  ditto -x -k WebTabs-macOS.zip ~/Applications
-```
+The apps aren't notarized (macOS) or code-signed (Windows) yet.
 
-The Mac app works like the Linux one described below: the same icon tab bar
-(unread bubbles, icon tags, `+` and the gear), right-click tab menu, middle-click
-to reload, the add/edit sheet with presets and Advanced, and the settings window
-with its tab manager. Shortcuts use ⌘ instead of Ctrl (⌘T, ⌘E, ⌘,, ⌘1…9,
-⌃Tab or ⇧⌘] / ⇧⌘[, ⌘R, ⌘[ / ⌘], ⇧⌘H for the tab's home page); the menu bar icon
-replaces the tray. Downloads go to ~/Downloads with a notification. The Dock icon
-shows the unread count (Settings › Unread count on Dock icon); macOS only shows it,
-and notifications, when WebTabs is allowed them in System Settings › Notifications.
+- **macOS** blocks the first launch of a downloaded copy. Open it anyway from
+  System Settings › Privacy & Security › *Open Anyway*. Downloading with `gh`
+  (above) skips this check.
+- **Windows** SmartScreen warns the first time: *More info › Run anyway*. The
+  installer needs the Microsoft Edge WebView2 Runtime, which every Windows 11 PC
+  already has; on Windows 10 it links you to it if missing.
 
-Config lives in `~/Library/Application Support/webtabs/tabs.toml`, site icons in
-`~/Library/Application Support/webtabs/favicons`. WebKit keeps the browsing
-profiles itself; `WEBTABS_DATA` selects a separate set of them (and of icons).
-Removing the last tab of an isolated session deletes that profile.
-Notifications use a page `Notification` bridge; service-worker push
-notifications are not supported. Pages are inspectable from Safari's Develop
-menu and with "Inspect Element".
+</details>
 
-### Shared implementation
+<details>
+<summary><b>Linux: requirements, removal and building from source</b></summary>
 
-`src/config.rs`, `badge.rs`, `links.rs`, `favicon.rs`, and `presets.rs` are the
-single source for both platforms: TOML parsing and validation, URL normalization,
-user agents, session naming, unread parsing, link routing and the external-link
-allowlist, favicon ranking and cache paths, and presets. `src/lib.rs` exposes
-them to Swift through an owned JSON/C interface; Rust allocates responses and
-Swift always releases them through Rust.
+WebTabs needs `webkit2gtk-4.1`, `gtk3` and `libayatana-appindicator` (the .deb
+and Arch packages pull these in), plus GStreamer's good/bad/libav plugins for
+media and calls.
 
-`src/linux/` owns GTK/WebKitGTK integration; `macos/` owns AppKit/WKWebView and
-follows the same structure: `main.swift` (window, tabs, notifications, config
-sync, like `linux/mod.rs`), `Web.swift` (`web.rs`), `TabDialog.swift`
-(`tab_dialog.rs`), `Settings.swift` (`settings.rs`), `Icons.swift` (`icons.rs`),
-`TabBar.swift` (the bar's views) and `Core.swift` (the bridge).
+- **Tarball:** installs into `~/.local`; use `PREFIX=/usr/local` with sudo for
+  everyone. Remove with `install.sh --uninstall`.
+- **.deb / Arch:** removed like any other package (`apt remove webtabs`,
+  `pacman -R webtabs`).
+- **From source:** `make install` (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
-A native test with its own config and profile (generated pages, no accounts)
-covers the bar, tab menu, add/edit sheets, settings, removal, empty state,
-isolated-profile cleanup and, run a second time with `--verify-profile`, that a
-cookie survives the restart:
+</details>
 
-```sh
-WEBTABS_CONFIG="$PWD/target/smoke/tabs.toml" \
-WEBTABS_DATA="$PWD/target/smoke/profile" \
-target/release/WebTabs.app/Contents/MacOS/WebTabs --smoke-test
-```
+Uninstalling never deletes your tabs or logins.
 
-Add `WEBTABS_SNAPSHOTS=<dir>` to save PNGs of the native windows it opens.
+## Using WebTabs
 
-The following installation instructions and Ctrl-based shortcuts describe Linux.
+**Add a tab** with **+**: pick WhatsApp, Slack, Telegram or Gmail in one click, or
+paste any URL. Optionally give it a short **icon tag** (like `W2`) to tell similar
+tabs apart, mute its notifications, or turn on **isolated login** for a second
+account. Several Slack *workspaces* on one account don't need it; switch between
+them inside Slack.
 
-## Install (Linux)
+**Manage tabs** by right-clicking one (reload, edit, move, remove) or open
+**Settings** with the gear:
 
-Needs `webkit2gtk-4.1`, `gtk3`, `libayatana-appindicator` (tray), and
-`gst-plugins-good`/`gst-plugins-bad`/`gst-libav` (media, calls).
+| Setting | What it does |
+|---|---|
+| Start with computer | Opens hidden in the tray when you log in |
+| Show notifications | Desktop notifications from your tabs |
+| Show icon in tray | Unread indicator and quick menu |
+| Close to tray | Closing the window keeps WebTabs running |
+| Unread count in window title | e.g. "webtabs (5)" |
+| Unread count on Dock / launcher icon | macOS Dock; Linux docks that support badges (KDE, Dash to Dock, Plank) |
+| GPU acceleration | Linux and Windows; turn off only if pages render wrong. Applies after a restart |
 
-From a release:
+Below the switches is your tab list: reorder, mute, edit or remove tabs.
 
-```sh
-# Any distro: tarball (installs into ~/.local; PREFIX=/usr/local with sudo for everyone)
-tar xzf webtabs-*-linux-x86_64.tar.gz && webtabs-*-linux-x86_64/install.sh
-#   remove: webtabs-*-linux-x86_64/install.sh --uninstall
-# Ubuntu 24.04+ / Debian 13+
-sudo apt install ./webtabs_*_amd64.deb
-# Arch (pacman tracks it, so updates and removal are plain pacman)
-sudo pacman -U webtabs-*-x86_64.pkg.tar.zst
-# AUR: packaging/aur/PKGBUILD builds from the tagged source (makepkg -si);
-# scripts/aur-update.sh <version> bumps it, its checksum and .SRCINFO.
-```
+<details>
+<summary><b>The config file: <code>tabs.toml</code></b></summary>
 
-From source:
-
-```sh
-make install      # ~/.local/bin/webtabs + desktop entry + icon
-make autostart    # optional: start hidden in the tray on login
-```
-
-## Tabs
-
-The tab bar shows each site's icon with its unread count; hover a tab to see its
-name. `+` opens the add window: one-click presets (WhatsApp, Slack, Telegram,
-Gmail) or any URL, plus an optional icon tag (e.g. "W"), mute, **isolated login**,
-and a user-agent picker under Advanced.
-
-**Isolated login** gives a tab its own cookies and storage, for a second account on
-the same service (two Slack or Gmail accounts). Several Slack *workspaces* on one
-account don't need it; switch between them inside Slack. Removing an isolated tab
-deletes its login data.
-
-Use `+` to add a tab, right-click a tab to edit, move or remove it, or open
-**settings with the gear** (top right). Settings has the app switches (start with
-computer, notifications, tray icon, close to tray, unread count in title and on the launcher icon) and the
-tab list, where you can reorder tabs and mute notifications per tab.
-
-Everything is stored in `~/.config/webtabs/tabs.toml`, which you can also edit by
-hand. The app reloads it on save and keeps running tabs (and their logins) for
-URLs that didn't change.
+| Platform | Location |
+|---|---|
+| Linux | `~/.config/webtabs/tabs.toml` |
+| macOS | `~/Library/Application Support/webtabs/tabs.toml` |
+| Windows | `%APPDATA%\webtabs\tabs.toml` |
 
 ```toml
 notifications = true
 tray = true
 close_to_tray = true
 unread_in_title = true
-unread_in_dock = true          # unread count on the Dock (macOS) / launcher icon (Linux)
-# user_agent = "..."            # global override (default: Safari)
+unread_in_dock = true            # macOS Dock / Linux launcher icon
+# gpu_acceleration = false       # Linux/Windows: draw pages on the CPU
+# user_agent = "..."             # override for every tab
 
 [[tab]]
 name = "WhatsApp"
 url = "https://web.whatsapp.com"
-notifications = false           # mute this tab (badge still shows)
-label = "W"                     # 1-2 letter tag on the icon
-session = "whatsapp-2"          # isolated login storage
+notifications = false            # muted (the badge still shows)
+label = "W"                      # 1–2 letter tag on the icon
+session = "whatsapp-2"           # isolated login
 
 [[tab]]
-name = "Internal"
+name = "Grafana"
 url = "https://grafana.example.com"
-user_agent = "..."              # per-tab override
+user_agent = "..."               # this tab only
 ```
 
-All tabs share one persistent profile in `~/.local/share/webtabs`. Site icons are
-cached in `~/.local/share/webtabs/favicons`.
+Save the file and WebTabs applies it immediately. Tabs whose URL didn't change
+keep running, logged in. A file with a mistake is ignored (you get a
+notification) until you fix it. Removing an isolated tab deletes its login data.
+
+</details>
 
 ## Shortcuts
 
-| Keys | Action |
-|---|---|
-| Ctrl+1…8 / Ctrl+9 | go to tab N / last tab |
-| Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PgUp/PgDn | next / previous tab |
-| Ctrl+R, F5 / Ctrl+Shift+R | reload / reload ignoring cache |
-| Alt+Left / Alt+Right / Alt+Home | back / forward / tab home page |
-| Ctrl+T / Ctrl+E | add tab / edit current tab |
-| Ctrl+= / Ctrl+- / Ctrl+0 | zoom in / out / reset |
-| Ctrl+, | settings |
-| F12, Ctrl+Shift+I | web inspector |
-| Ctrl+W / Ctrl+Q | hide to tray / quit |
+| Linux · Windows | macOS | Action |
+|---|---|---|
+| Ctrl+1…8 · Ctrl+9 | ⌘1…8 · ⌘9 | Go to tab N · last tab |
+| Ctrl+Tab · Ctrl+Shift+Tab | ⌃Tab · ⌃⇧Tab | Next · previous tab |
+| Ctrl+T | ⌘T | Add tab |
+| Ctrl+E ¹ | ⌘E | Edit current tab |
+| Ctrl+, | ⌘, | Settings |
+| Ctrl+R · F5 | ⌘R | Reload |
+| Alt+← · Alt+→ · Alt+Home | ⌘[ · ⌘] · ⇧⌘H | Back · forward · tab's home page |
+| Ctrl+= · Ctrl+- · Ctrl+0 | ⌘+ · ⌘- · ⌘0 | Zoom in · out · reset |
+| Ctrl+W · Ctrl+Q | ⌘W · ⌘Q | Hide to tray · quit |
+| F12 | Right-click › Inspect Element | Web inspector |
 
-Middle-click a tab to reload it.
+Middle-click a tab to reload it. ¹ Linux and macOS.
 
-## Behaviour
+## Good to know
 
-- **Unread badges** come from page titles (`(3) WhatsApp`, `Inbox (12)`, `* Slack`).
-  The total shows in the window title. The tray icon switches to its unread
-  variant and the taskbar entry flashes. Docks that support launcher badges
-  (KDE, Dash-to-Dock, Plank) show the count on the icon; Cinnamon's panel doesn't.
-- **Fullscreen video** (YouTube, Meet...) fills the screen and hides the tab bar;
-  Escape or switching tabs brings it back.
-- **Notifications** become desktop notifications, unless they're turned off in
-  settings or muted for that tab. Clicking one opens the right tab
-  and the page jumps to that chat or email.
-- **Links:** links you click to other sites open in your default browser. Same-site
-  windows and logins (Google, Microsoft, Okta, Apple, GitHub sign-in) open in a
-  small in-app popup so they finish inside the app's session. A page can't open
-  your browser or launch other apps by itself: that needs a real click, and only
-  web, mail and phone links are handed out.
-- **Permissions:** notifications and camera/mic (for Meet) are granted only to the
-  tab's own site; DRM is allowed. Location is denied. Pages can't read your
-  clipboard (your own copy/paste works as usual).
-- A crashed tab reloads itself (at most 3 times a minute). A broken `tabs.toml`
-  is ignored (with a notification) until you fix it.
+- **Unread counts** come from page titles like `(3) WhatsApp` or `Inbox (12)`.
+- **Fullscreen video** (YouTube, Meet) fills the screen on Linux and macOS; Escape
+  or switching tabs brings the tab bar back.
+- **Crashes:** a crashed tab reloads itself, at most three times a minute.
+- **Notifications on macOS** show only once WebTabs is allowed them in System
+  Settings › Notifications. Service-worker push notifications aren't supported.
 
-## Develop
+## Development
 
-```sh
-make test   # unit tests + clippy -D warnings
-cargo run
-```
-
-Environment overrides (handy for testing): `WEBTABS_CONFIG=path/to/tabs.toml`,
-`WEBTABS_DATA=dir`. `WEBTABS_DEBUG=1` prints every page's JS console to stdout.
-
-On NVIDIA's driver the app sets `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` itself:
-WebKitGTK's default renderer shows blank pages there, and this keeps pages
-GPU-rendered (only the finished frame is copied). Setting
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` instead also works but paints on the CPU.
+WebTabs is one Rust core (config, unread parsing, link rules, icons, presets)
+with a native front end per platform: GTK + WebKitGTK on Linux, Swift + AppKit +
+WKWebView on macOS, Win32 + WebView2 on Windows. Building, testing, packaging and
+releasing are in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
