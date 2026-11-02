@@ -1,0 +1,363 @@
+<!doctype html>
+<!-- webtabs settings and add/edit tab form on Windows, hosted in WebView2 by
+     panel.rs. Mirrors src/linux/settings.rs and src/linux/tab_dialog.rs; all
+     state and rules live in Rust, this page only renders and forwards clicks. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #f3f3f3; --card: #ffffff; --line: #e5e5e5; --text: #1b1b1b; --dim: #616161;
+    --accent: #005fb8; --accent-hover: #0067c0; --hover: #f0f0f0; --press: #e8e8e8;
+    --error: #c42b1c; --off: #8a8a8a;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 14px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    color: var(--text); background: var(--bg); user-select: none; overflow: hidden;
+  }
+  .view { display: none; height: 100%; flex-direction: column; padding: 18px; gap: 6px; }
+  .view.on { display: flex; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+  h2.gap { margin-top: 14px; }
+  .frame { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .grow { flex: 1; min-width: 0; }
+  .sub { color: var(--dim); font-size: 12px; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .disabled { opacity: .45; pointer-events: none; }
+
+  /* Windows 11 style toggle switch */
+  .switch { position: relative; width: 40px; height: 20px; flex: none; }
+  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .switch span {
+    position: absolute; inset: 0; border-radius: 10px; border: 1px solid var(--off);
+    background: transparent; transition: background .12s, border-color .12s; pointer-events: none;
+  }
+  .switch span::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px;
+    border-radius: 50%; background: #5d5d5d; transition: transform .12s, background .12s;
+  }
+  .switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + span::after { background: #fff; transform: translateX(20px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--text); outline-offset: 2px; }
+
+  #tabs { flex: 1; min-height: 120px; overflow-y: auto; }
+  #tabs .row { padding: 8px 10px; gap: 10px; }
+  .favicon { width: 24px; height: 24px; flex: none; border-radius: 5px; object-fit: contain; }
+  .letter {
+    width: 24px; height: 24px; flex: none; border-radius: 6px; color: #fff; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .empty { color: var(--dim); text-align: center; padding: 18px; }
+
+  button {
+    font: inherit; color: var(--text); background: var(--card); border: 1px solid #d1d1d1;
+    border-bottom-color: #bdbdbd; border-radius: 4px; padding: 5px 14px; min-height: 32px;
+  }
+  button:hover { background: #f6f6f6; }
+  button:active { background: var(--press); }
+  button:disabled { opacity: .45; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: var(--accent-hover); }
+  button.icon {
+    border: none; background: transparent; width: 32px; height: 32px; min-height: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center; border-radius: 4px;
+  }
+  button.icon:hover:not(:disabled) { background: var(--hover); }
+  button.icon:active:not(:disabled) { background: var(--press); }
+  button.icon svg { width: 16px; height: 16px; }
+  button.icon.on { color: var(--accent); }
+  button.with-icon { display: inline-flex; align-items: center; gap: 6px; }
+  button.with-icon svg { width: 14px; height: 14px; }
+  .actions { display: flex; justify-content: space-between; margin-top: 4px; }
+  .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
+  /* Add / edit tab form */
+  #form { gap: 14px; overflow-y: auto; }
+  .presets { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
+  .preset {
+    display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 4px;
+    border: none; background: transparent; border-radius: 12px; min-height: 0;
+  }
+  .preset:hover { background: var(--card); }
+  .preset img, .preset .letter { width: 40px; height: 40px; border-radius: 8px; font-size: 18px; }
+  .grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
+  .grid > label.key { text-align: right; }
+  input[type=text], select {
+    font: inherit; color: var(--text); background: var(--card); border: 1px solid #d1d1d1;
+    border-bottom: 1px solid #8a8a8a; border-radius: 4px; padding: 5px 10px; min-height: 32px; width: 100%;
+    user-select: text;
+  }
+  input[type=text]:focus, select:focus { outline: none; border-bottom: 2px solid var(--accent); }
+  input.error { border-color: var(--error); border-bottom-color: var(--error); }
+  input.tag { width: 7em; }
+  .check { display: flex; align-items: center; gap: 8px; }
+  .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+  .hint { color: var(--dim); font-size: 12px; }
+  details summary { cursor: default; padding: 2px 0; }
+  details .grid { margin-top: 8px; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+
+<div class="view" id="settings">
+  <h2>General</h2>
+  <div class="frame" id="general"></div>
+  <h2 class="gap">Tabs</h2>
+  <div class="frame" id="tabs"></div>
+  <div class="actions">
+    <button class="with-icon" id="add"><svg viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>Add tab</button>
+    <button id="toml">Open tabs.toml</button>
+  </div>
+  <div class="footer"><button id="close">Close</button></div>
+</div>
+
+<div class="view" id="form">
+  <div class="presets" id="presets"></div>
+  <div class="grid">
+    <label class="key" for="url">URL</label>
+    <input type="text" id="url" placeholder="https://… or pick a service above" spellcheck="false">
+    <label class="key" for="name">Name</label>
+    <input type="text" id="name" placeholder="shown when you hover the icon">
+    <label class="key" for="label">Icon tag</label>
+    <div><input type="text" id="label" class="tag" maxlength="2" placeholder="e.g. W"
+         title="Optional 1-2 letters drawn on the icon, to tell similar tabs apart"></div>
+    <span></span>
+    <label class="check"><input type="checkbox" id="isolated">Isolated login (own cookies, for a second account)</label>
+    <span></span>
+    <div><div class="hint" id="isoHint" hidden></div></div>
+    <span></span>
+    <label class="check"><input type="checkbox" id="mute">Mute notifications</label>
+  </div>
+  <details id="advanced">
+    <summary>Advanced</summary>
+    <div class="grid">
+      <label class="key" for="ua">User agent</label>
+      <select id="ua"></select>
+      <span></span>
+      <div><input type="text" id="uaCustom" placeholder="User agent string" spellcheck="false" hidden></div>
+      <span></span>
+      <div class="hint">Change only if a site says your browser isn't supported. The tab reloads.</div>
+    </div>
+  </details>
+  <div class="spacer"></div>
+  <div class="footer">
+    <button id="cancel">Cancel</button>
+    <button class="primary" id="save">Add tab</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const post = m => window.chrome.webview.postMessage(m);
+const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777"];
+const SVG = {
+  bell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14h3"/></svg>',
+  muted: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14h3M2 2l12 12"/></svg>',
+  up: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>',
+  down: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>',
+  edit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M10.5 2.5l3 3L5.5 13.5H2.5v-3z"/></svg>',
+  trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v5M9.2 6.5v5"/></svg>',
+};
+
+let S = null;         // last state from Rust
+let form = null;      // {id: tab id or null when adding, only: window opened just for the form}
+
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") e.className = v;
+    else if (k === "html") e.innerHTML = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids) if (kid !== null && kid !== undefined) e.append(kid);
+  return e;
+}
+
+function icon(src, name, cls) {
+  if (src) return el("img", { class: cls, src, alt: "" });
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.codePointAt(0)) >>> 0;
+  const d = el("div", { class: "letter " + (cls || "") }, (name.trim()[0] || "?").toUpperCase());
+  d.style.background = PALETTE[h % PALETTE.length];
+  return d;
+}
+
+function switchRow(title, sub, on, onchange, enabled = true) {
+  const input = el("input", { type: "checkbox", role: "switch", "aria-label": title });
+  input.checked = on;
+  input.addEventListener("change", () => onchange(input.checked));
+  return el("div", { class: "row" + (enabled ? "" : " disabled") },
+    el("div", { class: "grow" }, el("div", {}, title), el("div", { class: "sub" }, sub)),
+    el("label", { class: "switch" }, input, el("span")));
+}
+
+function renderSettings() {
+  const o = S.options;
+  const set = key => on => post({ cmd: "set", key, value: on });
+  $("general").replaceChildren(
+    switchRow("Start with computer", "Opens hidden in the tray when you log in", S.autostart,
+      on => post({ cmd: "autostart", on })),
+    switchRow("Show notifications", "Desktop notifications from your tabs", o.notifications, set("notifications")),
+    switchRow("Show icon in tray", "Unread indicator and quick menu in the notification area", o.tray, set("tray")),
+    // Closing to a tray that isn't there would make the app unreachable.
+    switchRow("Close to tray", "Closing the window keeps webtabs running", o.close_to_tray, set("close_to_tray"), o.tray),
+    switchRow("Unread count in window title", "e.g. “webtabs (5)”", o.unread_in_title, set("unread_in_title")),
+    switchRow("GPU acceleration", "Applies after restarting webtabs", o.gpu_acceleration, set("gpu_acceleration")),
+  );
+
+  const list = $("tabs");
+  const top = list.scrollTop;
+  if (!S.tabs.length) {
+    list.replaceChildren(el("div", { class: "empty" }, "No tabs yet"));
+    return;
+  }
+  list.replaceChildren(...S.tabs.map((t, i) => {
+    const btn = (svg, tip, enabled, cmd, extra = {}) =>
+      el("button", { class: "icon", title: tip, "aria-label": tip, disabled: !enabled, html: svg,
+        onclick: () => post({ cmd, id: t.id, ...extra }) });
+    const bell = t.notifications
+      ? btn(SVG.bell, "Notifications on (click to mute)", true, "tab_notify", { on: false })
+      : btn(SVG.muted, "Muted (click to unmute)", true, "tab_notify", { on: true });
+    if (t.notifications) bell.classList.add("on");
+    return el("div", { class: "row" },
+      icon(t.icon, t.name, "favicon"),
+      el("div", { class: "grow" },
+        el("div", { class: "ellipsis" }, t.name),
+        el("div", { class: "sub ellipsis", title: t.url }, t.url)),
+      bell,
+      btn(SVG.up, "Move up (left in the tab bar)", i > 0, "move", { delta: -1 }),
+      btn(SVG.down, "Move down (right in the tab bar)", i + 1 < S.tabs.length, "move", { delta: 1 }),
+      el("button", { class: "icon", title: "Edit", "aria-label": "Edit", html: SVG.edit,
+        onclick: () => openForm(t.id, false) }),
+      btn(SVG.trash, "Remove", true, "remove"));
+  }));
+  list.scrollTop = top;
+}
+
+function show(view) {
+  for (const v of document.querySelectorAll(".view")) v.classList.toggle("on", v.id === view);
+  post({ cmd: "view", title: view === "settings" ? "webtabs settings" : form.id === null ? "Add tab" : "Edit tab" });
+}
+
+function openForm(id, only) {
+  form = { id, only };
+  const t = id === null ? null : S.tabs.find(x => x.id === id);
+  if (id !== null && !t) return;
+  $("presets").hidden = id !== null;
+  $("presets").replaceChildren(...S.presets.map((p, i) => el("button", {
+    class: "preset", title: p.url, "data-i": i,
+    onclick: () => {
+      $("url").value = p.url; $("name").value = p.name;
+      $("url").classList.remove("error"); hint(); $("name").focus();
+    } }, icon(p.icon, p.name), el("span", {}, p.name))));
+  $("url").value = t ? t.url : "";
+  $("name").value = t ? t.name : "";
+  $("label").value = t && t.label ? t.label : "";
+  $("isolated").checked = !!(t && t.isolated);
+  $("mute").checked = !!(t && !t.notifications);
+  $("url").classList.remove("error");
+
+  const ua = $("ua");
+  ua.replaceChildren(el("option", { value: "default" }, "Default (Edge)"),
+    ...S.ua_presets.map(([n]) => el("option", { value: n }, n)),
+    el("option", { value: "custom" }, "Custom…"));
+  const cur = t ? t.user_agent : null;
+  const preset = cur && S.ua_presets.find(([, v]) => v === cur);
+  ua.value = !cur ? "default" : preset ? preset[0] : "custom";
+  $("uaCustom").value = ua.value === "custom" ? cur : "";
+  $("uaCustom").hidden = ua.value !== "custom";
+  $("advanced").open = ua.value !== "default";
+  $("save").textContent = id === null ? "Add tab" : "Save";
+  $("isoHint").hidden = true;
+  show("form");
+  hint();
+  (id === null ? $("url") : $("name")).focus();
+}
+
+function closeForm() {
+  if (!form) return;
+  if (form.only) { post({ cmd: "close" }); return; }
+  form = null;
+  show("settings");
+}
+
+function hint() {
+  if (form) post({ cmd: "hint", id: form.id, url: $("url").value, isolated: $("isolated").checked });
+}
+
+function save() {
+  post({
+    cmd: "save_tab", id: form.id, url: $("url").value, name: $("name").value, label: $("label").value,
+    isolated: $("isolated").checked, mute: $("mute").checked,
+    ua: $("ua").value, ua_custom: $("uaCustom").value,
+  });
+}
+
+window.chrome.webview.addEventListener("message", e => {
+  const m = e.data;
+  switch (m.cmd) {
+    case "state":
+      S = m;
+      renderSettings();
+      break;
+    case "form":       // from Rust: the "+" button, a tab's Edit…, or Ctrl+T
+      openForm(m.id, m.only);
+      break;
+    case "settings":
+      form = null;
+      show("settings");
+      break;
+    case "preset_icon": {
+      S.presets[m.index].icon = m.src;
+      const b = document.querySelector(`.preset[data-i="${m.index}"]`);
+      if (b) b.firstChild.replaceWith(icon(m.src, S.presets[m.index].name));
+      break;
+    }
+    case "hint":
+      $("isoHint").textContent = m.text || "";
+      $("isoHint").hidden = !m.text;
+      break;
+    case "tab_invalid":
+      $("url").classList.add("error");
+      $("url").focus();
+      break;
+    case "tab_saved":
+      closeForm();
+      break;
+  }
+});
+
+$("add").onclick = () => openForm(null, false);
+$("toml").onclick = () => post({ cmd: "open_toml" });
+$("close").onclick = () => post({ cmd: "close" });
+$("cancel").onclick = closeForm;
+$("save").onclick = save;
+$("url").addEventListener("input", () => { $("url").classList.remove("error"); hint(); });
+$("isolated").addEventListener("change", hint);
+$("ua").addEventListener("change", () => {
+  $("uaCustom").hidden = $("ua").value !== "custom";
+  if ($("ua").value === "custom") $("uaCustom").focus();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { e.preventDefault(); form ? closeForm() : post({ cmd: "close" }); }
+  else if (e.key === "Enter" && form && e.target.tagName === "INPUT" && e.target.type === "text") {
+    e.preventDefault(); save();
+  }
+});
+// Nothing here is a document to drop files on or a link to follow.
+for (const t of ["dragover", "drop"]) document.addEventListener(t, e => e.preventDefault());
+document.addEventListener("contextmenu", e => {
+  if (!(e.target.tagName === "INPUT" && e.target.type === "text")) e.preventDefault();
+});
+post({ cmd: "ready" });
+</script>
+</body>
+</html>

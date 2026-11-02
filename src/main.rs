@@ -1,7 +1,7 @@
 // Release builds are GUI apps on Windows: no console window behind them.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// XDG autostart: Linux only for now (Windows' mechanism is an open decision).
+// XDG autostart (Linux). Windows uses the Run key: src/windows/autostart.rs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod autostart;
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]

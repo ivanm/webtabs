@@ -36,10 +36,13 @@ Config lives in `%APPDATA%\webtabs\tabs.toml`, WebView2 profiles in
 session). The prototype has the icon tab bar with unread bubbles and tags, the
 total in the title, link routing, isolated sessions, notifications (shown as
 Windows toasts through the tray icon; clicking one opens the tab), tray icon
-with unread state, close-to-tray and hot reload of `tabs.toml`. There is no
-add/edit dialog or settings window yet: `+` offers the presets, the gear and the
-tray menu hold the switches and open `tabs.toml` in Notepad. `WEBTABS_DEBUG=1`
-traces routing and notifications to stderr.
+with unread state, close-to-tray and hot reload of `tabs.toml`. The settings
+window (gear, Ctrl+,) and the add/edit tab form (`+`, Ctrl+T, a tab's Edit…)
+match Linux's; they are a local page in WebView2 (`src/windows/panel.html`), the
+rules stay in Rust. "Start with computer" adds a `webtabs` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which Task Manager's
+Startup tab also lists. `WEBTABS_DEBUG=1` traces routing and notifications to
+stderr.
 
 ## Build and run on macOS
 

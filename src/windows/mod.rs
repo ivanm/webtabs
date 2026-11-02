@@ -13,17 +13,19 @@ macro_rules! debug {
     };
 }
 
+mod autostart;
 mod icons;
 mod paint;
+mod panel;
 mod web;
 
 use crate::badge::Badge;
 use crate::config::{self, Config, Tab};
-use crate::{favicon, links, presets};
+use crate::{favicon, links};
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, ScreenToClient, UpdateWindow,
+    GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    ScreenToClient, UpdateWindow,
 };
 use ::windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IStream};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -62,22 +64,15 @@ const CRASH_WINDOW: Duration = Duration::from_secs(60);
 
 // Menu command ids (TrackPopupMenu with TPM_RETURNCMD).
 const CMD_SHOW: u32 = 1;
-const CMD_EDIT_CONFIG: u32 = 2;
-const CMD_NOTIFICATIONS: u32 = 3;
-const CMD_CLOSE_TO_TRAY: u32 = 4;
-const CMD_UNREAD_TITLE: u32 = 5;
-const CMD_TRAY: u32 = 6;
-const CMD_QUIT: u32 = 7;
-const CMD_GPU: u32 = 8;
+const CMD_SETTINGS: u32 = 2;
+const CMD_QUIT: u32 = 3;
 const CMD_RELOAD: u32 = 20;
 const CMD_HOME: u32 = 21;
 const CMD_LEFT: u32 = 22;
 const CMD_RIGHT: u32 = 23;
-const CMD_REMOVE: u32 = 24;
-const CMD_DEVTOOLS: u32 = 25;
-const CMD_TAB_NOTIFY: u32 = 26;
-const CMD_CUSTOM_TAB: u32 = 99;
-const CMD_PRESET: u32 = 100;
+const CMD_EDIT: u32 = 24;
+const CMD_REMOVE: u32 = 25;
+const CMD_ADD: u32 = 26;
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -638,8 +633,8 @@ impl App {
             Key::Tab(d) => self.select_index((d as usize).saturating_sub(1).min(n - 1)),
             Key::Next => self.select_index((cur + 1) % n),
             Key::Prev => self.select_index((cur + n - 1) % n),
-            Key::AddTab => self.add_tab_menu(None),
-            Key::Settings => self.settings_menu(None, false),
+            Key::AddTab => panel::open(self, panel::Open::Add),
+            Key::Settings => panel::open(self, panel::Open::Settings),
             Key::Hide => {
                 // Never hide into a tray that isn't there.
                 if self.can_hide_to_tray() {
@@ -1034,6 +1029,52 @@ impl App {
         self.save();
     }
 
+    fn all_tabs(&self) -> Vec<Tab> {
+        self.all_views()
+            .iter()
+            .map(|t| t.tab.borrow().clone())
+            .collect()
+    }
+
+    /// Applies the edit form. A webview can't change profiles, so a tab that
+    /// gains or loses its isolated login gets a fresh view in the same place.
+    fn edit_tab(&self, tv: &Rc<TabView>, tab: &Tab) {
+        if tv.tab.borrow().session != tab.session {
+            self.replace_tab(tv, tab);
+        } else {
+            self.apply_tab(tv, tab);
+            self.after_tabs_changed();
+        }
+        self.save();
+    }
+
+    /// Swaps a tab for a freshly built one in the same position.
+    fn replace_tab(&self, old: &Rc<TabView>, tab: &Tab) {
+        let was_current = self.current.get() == old.id;
+        let fresh = self.create_tab(tab);
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let Some(i) = tabs.iter().position(|t| t.id == old.id) else {
+                return;
+            };
+            tabs[i] = fresh.clone();
+        }
+        // After the swap, so an isolated login nobody uses anymore is deleted.
+        let session = old.tab.borrow().session.clone();
+        self.detach(old, session.as_deref());
+        if was_current {
+            self.select(&fresh);
+        } else {
+            self.load(&fresh);
+        }
+        self.after_tabs_changed();
+    }
+
+    fn set_tab_notifications(&self, tv: &TabView, on: bool) {
+        tv.tab.borrow_mut().notifications = on;
+        self.save();
+    }
+
     // ---- icons -----------------------------------------------------------------
 
     /// Reads the page's declared icons and downloads the best one on a worker thread.
@@ -1065,6 +1106,7 @@ impl App {
             icons::store(&tv.tab.borrow().url, &fetched.bytes);
             *tv.icon.borrow_mut() = Some(img);
             self.invalidate_bar();
+            panel::refresh();
             return;
         }
         // Nothing declared decodes (SVG-only sites): use WebView2's own favicon.
@@ -1091,6 +1133,7 @@ impl App {
                     icons::store(&tv.tab.borrow().url, &bytes);
                     *tv.icon.borrow_mut() = Some(img);
                     app.invalidate_bar();
+                    panel::refresh();
                 }
             });
             Ok(())
@@ -1296,7 +1339,7 @@ impl App {
                 // NOTIFYICON_VERSION_4: wparam holds the anchor point.
                 let x = (wparam.0 & 0xffff) as i16 as i32;
                 let y = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
-                self.settings_menu(Some(POINT { x, y }), true);
+                self.tray_menu(POINT { x, y });
             }
             _ => {}
         }
@@ -1329,156 +1372,38 @@ impl App {
         }
     }
 
-    fn below(&self, hit: Hit) -> POINT {
-        let rc = self.cell_rect(hit);
-        let mut pt = POINT {
-            x: rc.left,
-            y: rc.bottom,
-        };
-        unsafe {
-            let _ = ClientToScreen(self.hwnd, &mut pt);
-        }
-        pt
-    }
-
-    /// Gear / tray menu: show, edit tabs.toml, app-wide switches, quit.
-    fn settings_menu(&self, at: Option<POINT>, from_tray: bool) {
-        let cfg = self.config.borrow().clone();
-        let at = at.or_else(|| (!from_tray).then(|| self.below(Hit::Gear)));
+    /// Tray menu, like Linux's: show/hide, settings, quit.
+    fn tray_menu(&self, at: POINT) {
         let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
             return;
         };
-        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         unsafe {
-            if from_tray {
-                let label = if self.is_visible() {
-                    "Hide webtabs"
-                } else {
-                    "Show webtabs"
-                };
-                let _ = AppendMenuW(menu, MF_STRING, CMD_SHOW as usize, &HSTRING::from(label));
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            }
+            let _ = AppendMenuW(menu, MF_STRING, CMD_SHOW as usize, w!("Show / Hide"));
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
-                CMD_EDIT_CONFIG as usize,
-                w!("Edit tabs.toml\u{2026}"),
+                CMD_SETTINGS as usize,
+                w!("Settings\u{2026}"),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | check(cfg.notifications),
-                CMD_NOTIFICATIONS as usize,
-                w!("Notifications"),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | check(cfg.unread_in_title),
-                CMD_UNREAD_TITLE as usize,
-                w!("Unread count in window title"),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | check(cfg.tray),
-                CMD_TRAY as usize,
-                w!("Tray icon"),
-            );
-            let close_flags = MF_STRING
-                | check(cfg.close_to_tray)
-                | if cfg.tray { MF_ENABLED } else { MF_GRAYED };
-            let _ = AppendMenuW(
-                menu,
-                close_flags,
-                CMD_CLOSE_TO_TRAY as usize,
-                w!("Closing the window keeps webtabs in the tray"),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | check(cfg.gpu_acceleration),
-                CMD_GPU as usize,
-                w!("GPU acceleration (applies after restarting webtabs)"),
-            );
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, w!("Quit\tCtrl+Q"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, w!("Quit"));
         }
-        match self.popup_menu(menu, at) {
+        match self.popup_menu(menu, Some(at)) {
             CMD_SHOW => self.toggle_visible(),
-            CMD_EDIT_CONFIG => self.edit_config(),
-            CMD_NOTIFICATIONS => self.update_options(|c| c.notifications = !c.notifications),
-            CMD_UNREAD_TITLE => self.update_options(|c| c.unread_in_title = !c.unread_in_title),
-            CMD_TRAY => self.update_options(|c| c.tray = !c.tray),
-            CMD_CLOSE_TO_TRAY => self.update_options(|c| c.close_to_tray = !c.close_to_tray),
-            CMD_GPU => self.update_options(|c| c.gpu_acceleration = !c.gpu_acceleration),
+            CMD_SETTINGS => {
+                self.show();
+                panel::open(self, panel::Open::Settings);
+            }
             CMD_QUIT => self.quit(),
             _ => {}
         }
     }
 
-    /// "+": the shared presets, or hand-editing tabs.toml for anything else.
-    fn add_tab_menu(&self, at: Option<POINT>) {
-        let at = at.unwrap_or_else(|| self.below(Hit::Add));
-        let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
-            return;
-        };
-        unsafe {
-            for (i, p) in presets::PRESETS.iter().enumerate() {
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING,
-                    (CMD_PRESET as usize) + i,
-                    &HSTRING::from(p.name),
-                );
-            }
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                CMD_CUSTOM_TAB as usize,
-                w!("Other site (edit tabs.toml)\u{2026}"),
-            );
-        }
-        match self.popup_menu(menu, Some(at)) {
-            CMD_CUSTOM_TAB => self.edit_config(),
-            cmd if cmd >= CMD_PRESET => {
-                if let Some(p) = presets::PRESETS.get((cmd - CMD_PRESET) as usize) {
-                    let mut tab = Tab::new(p.name, p.url, None);
-                    // A second account of the same service needs its own logins.
-                    let existing: Vec<Tab> = self
-                        .all_views()
-                        .iter()
-                        .map(|t| t.tab.borrow().clone())
-                        .collect();
-                    // Same rule as the Linux dialog's hint: a tab on the same site shares logins.
-                    let site_of = |u: &str| {
-                        url::Url::parse(u)
-                            .ok()
-                            .and_then(|u| u.host_str().map(links::site))
-                    };
-                    let site = site_of(&tab.url);
-                    if site.is_some()
-                        && existing
-                            .iter()
-                            .any(|t| t.session.is_none() && site_of(&t.url) == site)
-                    {
-                        let taken: Vec<&str> = existing
-                            .iter()
-                            .filter_map(|t| t.session.as_deref())
-                            .collect();
-                        tab.session = Some(config::new_session_key(&tab.name, &taken));
-                    }
-                    self.add_tab(tab);
-                }
-            }
-            _ => {}
-        }
-    }
-
+    /// A tab's right-click menu, like Linux's.
     fn tab_menu(&self, tv: &Rc<TabView>) {
         let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
             return;
         };
-        let notify = tv.tab.borrow().notifications;
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING, CMD_RELOAD as usize, w!("Reload\tCtrl+R"));
             let _ = AppendMenuW(
@@ -1489,27 +1414,21 @@ impl App {
             );
             let _ = AppendMenuW(menu, MF_STRING, CMD_LEFT as usize, w!("Move left"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_RIGHT as usize, w!("Move right"));
-            let flags = MF_STRING | if notify { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(
-                menu,
-                flags,
-                CMD_TAB_NOTIFY as usize,
-                w!("Notifications from this tab"),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                CMD_DEVTOOLS as usize,
-                w!("Inspect (DevTools)\tF12"),
-            );
+            let _ = AppendMenuW(menu, MF_STRING, CMD_EDIT as usize, w!("Edit\u{2026}"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_REMOVE as usize, w!("Remove"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
-                CMD_EDIT_CONFIG as usize,
-                w!("Edit tabs.toml\u{2026}"),
+                CMD_ADD as usize,
+                w!("Add tab\u{2026}\tCtrl+T"),
             );
-            let _ = AppendMenuW(menu, MF_STRING, CMD_REMOVE as usize, w!("Remove"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_SETTINGS as usize,
+                w!("Settings\u{2026}\tCtrl+,"),
+            );
         }
         match self.popup_menu(menu, None) {
             CMD_RELOAD => {
@@ -1522,19 +1441,10 @@ impl App {
             CMD_HOME => self.go_home(tv),
             CMD_LEFT => self.move_tab(tv, -1),
             CMD_RIGHT => self.move_tab(tv, 1),
-            CMD_TAB_NOTIFY => {
-                tv.tab.borrow_mut().notifications = !notify;
-                self.save();
-            }
-            CMD_DEVTOOLS => {
-                if let Some(wv) = tv.webview() {
-                    unsafe {
-                        let _ = wv.OpenDevToolsWindow();
-                    }
-                }
-            }
-            CMD_EDIT_CONFIG => self.edit_config(),
+            CMD_EDIT => panel::open(self, panel::Open::Edit(tv.id)),
             CMD_REMOVE => self.confirm_remove(tv),
+            CMD_ADD => panel::open(self, panel::Open::Add),
+            CMD_SETTINGS => panel::open(self, panel::Open::Settings),
             _ => {}
         }
     }
@@ -1544,18 +1454,38 @@ impl App {
             let t = tv.tab.borrow();
             (t.name.clone(), t.session.clone())
         };
-        let detail = if session.is_some() {
-            "\n\nIts isolated login data is deleted too."
-        } else {
-            ""
+        // Owned by the settings window when it asked, so it stays on top of it.
+        let owner = panel::hwnd().unwrap_or(self.hwnd);
+        // A task dialog, for Linux's "Remove" / "Cancel" buttons (a message box
+        // can only say OK). Cancel is the default: Enter never deletes a login.
+        let title = HSTRING::from(format!("Remove \"{name}\"?"));
+        let detail = HSTRING::from("Its isolated login data is deleted too.");
+        let remove = HSTRING::from("Remove");
+        let buttons = [TASKDIALOG_BUTTON {
+            nButtonID: IDOK.0,
+            pszButtonText: PCWSTR(remove.as_ptr()),
+        }];
+        let config = TASKDIALOGCONFIG {
+            cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+            hwndParent: owner,
+            dwFlags: TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION,
+            dwCommonButtons: TDCBF_CANCEL_BUTTON,
+            pszWindowTitle: w!("webtabs"),
+            pszMainInstruction: PCWSTR(title.as_ptr()),
+            pszContent: if session.is_some() {
+                PCWSTR(detail.as_ptr())
+            } else {
+                PCWSTR::null()
+            },
+            cButtons: buttons.len() as u32,
+            pButtons: buttons.as_ptr(),
+            nDefaultButton: IDCANCEL.0,
+            ..Default::default()
         };
-        let answer = unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                &HSTRING::from(format!("Remove \"{name}\"?{detail}")),
-                w!("webtabs"),
-                MB_OKCANCEL | MB_ICONQUESTION,
-            )
+        let mut pressed = 0;
+        let answer = match unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) } {
+            Ok(()) => MESSAGEBOX_RESULT(pressed),
+            Err(_) => IDCANCEL,
         };
         if answer == IDOK {
             self.remove_tab(tv);
@@ -1610,6 +1540,7 @@ impl App {
         }
         self.config_stamp.set(modified(&self.config_path));
         *self.config.borrow_mut() = cfg;
+        panel::refresh();
     }
 
     /// Polled every second: Notepad (and most editors) replace the file on save.
@@ -1674,6 +1605,7 @@ impl App {
         if self.env.borrow().is_some() {
             self.load_tabs_progressively();
         }
+        panel::refresh(); // the settings window shows the hand-edited file
     }
 
     // ---- window procedure ---------------------------------------------------------
@@ -1765,8 +1697,8 @@ impl App {
                 let (x, y) = point(lparam);
                 match self.hit_test(x, y) {
                     Some(Hit::Tab(i)) => self.select_index(i),
-                    Some(Hit::Add) => self.add_tab_menu(None),
-                    Some(Hit::Gear) => self.settings_menu(None, false),
+                    Some(Hit::Add) => panel::open(self, panel::Open::Add),
+                    Some(Hit::Gear) => panel::open(self, panel::Open::Settings),
                     None => {}
                 }
             }
@@ -1779,7 +1711,7 @@ impl App {
                             self.tab_menu(&tv);
                         }
                     }
-                    _ => self.settings_menu(None, false),
+                    _ => panel::open(self, panel::Open::Settings),
                 }
             }
             WM_MBUTTONUP => {
