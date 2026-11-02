@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>(3) Chat</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="https://web.whatsapp.com/favicon.ico">
+<style>
+:root { --bg:#eef1f4; --side:#fff; --line:#e3e6ea; --text:#1d2329; --dim:#6b7580; --in:#fff; --out:#dcebff; --accent:#2f7cf6; --sel:#eaf1fd; }
+@media (prefers-color-scheme: dark) { :root { --bg:#16191d; --side:#1d2126; --line:#2a2f36; --text:#e8ebee; --dim:#8b949e; --in:#252a31; --out:#1e3a5c; --accent:#5b9bff; --sel:#232a33; } }
+* { box-sizing:border-box; margin:0; }
+body { font:14px/1.4 -apple-system, system-ui, sans-serif; color:var(--text); background:var(--bg); height:100vh; display:flex; overflow:hidden; }
+aside { width:340px; background:var(--side); border-right:1px solid var(--line); display:flex; flex-direction:column; }
+.top { padding:16px 18px 10px; font-weight:700; font-size:20px; }
+.search { margin:0 14px 10px; padding:8px 12px; border-radius:10px; background:var(--bg); color:var(--dim); }
+.chat { display:flex; gap:12px; padding:11px 16px; align-items:center; }
+.chat.sel { background:var(--sel); }
+.av { width:44px; height:44px; border-radius:50%; flex:none; display:grid; place-items:center; color:#fff; font-weight:600; font-size:16px; }
+.meta { flex:1; min-width:0; }
+.row { display:flex; justify-content:space-between; gap:8px; }
+.name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.time { color:var(--dim); font-size:12px; }
+.last { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.n { background:var(--accent); color:#fff; border-radius:10px; font-size:11px; font-weight:700; padding:1px 7px; }
+main { flex:1; display:flex; flex-direction:column; }
+header { display:flex; gap:12px; align-items:center; padding:12px 20px; background:var(--side); border-bottom:1px solid var(--line); }
+header .av { width:40px; height:40px; font-size:15px; }
+.sub { color:var(--dim); font-size:12px; }
+.msgs { flex:1; overflow:hidden; padding:24px 48px; display:flex; flex-direction:column; gap:8px; justify-content:flex-end; }
+.day { align-self:center; color:var(--dim); font-size:12px; background:var(--side); padding:3px 10px; border-radius:8px; margin-bottom:6px; }
+.m { max-width:62%; padding:8px 12px 6px; border-radius:14px; background:var(--in); box-shadow:0 1px 1px rgba(0,0,0,.06); }
+.m.me { align-self:flex-end; background:var(--out); }
+.m b { display:block; font-size:12px; margin-bottom:2px; }
+.m i { display:block; text-align:right; font-style:normal; color:var(--dim); font-size:11px; margin-top:2px; }
+footer { display:flex; gap:10px; padding:12px 20px; background:var(--side); border-top:1px solid var(--line); }
+.box { flex:1; padding:10px 14px; border-radius:20px; background:var(--bg); color:var(--dim); }
+.send { width:40px; height:40px; border-radius:50%; background:var(--accent); display:grid; place-items:center; color:#fff; font-size:18px; }
+</style></head>
+<body>
+<aside>
+  <div class="top">Chats</div>
+  <div class="search">Search</div>
+  <div class="chat sel"><div class="av" style="background:#3aa675">SB</div><div class="meta"><div class="row"><span class="name">Scranton branch</span><span class="time">9:41</span></div><div class="row"><span class="last">Michael: That's what she said.</span><span class="n">2</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#8a6d3b">DS</div><div class="meta"><div class="row"><span class="name">Dwight Schrute</span><span class="time">9:30</span></div><div class="row"><span class="last">Beet harvest is Saturday. Attendance is mandatory.</span><span class="n">1</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#d9487a">PB</div><div class="meta"><div class="row"><span class="name">Pam Beesly</span><span class="time">9:12</span></div><div class="row"><span class="last">Did you move Dwight's desk to the roof??</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#e8833a">KM</div><div class="meta"><div class="row"><span class="name">Kevin Malone</span><span class="time">8:55</span></div><div class="row"><span class="last">Who brought the chili. Asking for me</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#7b61ff">AM</div><div class="meta"><div class="row"><span class="name">Angela Martin</span><span class="time">Yesterday</span></div><div class="row"><span class="last">Party Planning Committee is NOT optional.</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#2f9bd6">SH</div><div class="meta"><div class="row"><span class="name">Stanley Hudson</span><span class="time">Yesterday</span></div><div class="row"><span class="last">Is it pretzel day yet</span></div></div></div>
+  <div class="chat"><div class="av" style="background:#8a9a2e">CB</div><div class="meta"><div class="row"><span class="name">Creed Bratton</span><span class="time">Mon</span></div><div class="row"><span class="last">Sold the copier. Bought a goat.</span></div></div></div>
+</aside>
+<main>
+  <header><div class="av" style="background:#3aa675">SB</div><div><div class="name">Scranton branch</div><div class="sub">Michael, Dwight, Kevin, Angela, you</div></div></header>
+  <div class="msgs">
+    <div class="day">Today</div>
+    <div class="m"><b style="color:#e8833a">Michael</b>Conference room in 5. Bring your A game. And snacks. Mostly snacks.<i>9:30</i></div>
+    <div class="m"><b style="color:#8a6d3b">Dwight</b>I have been in the conference room for 20 minutes. Perimeter secured.<i>9:31</i></div>
+    <div class="m"><b style="color:#2f9bd6">Kevin</b>Is the meeting about the chili? I'm bringing the chili.<i>9:36</i></div>
+    <div class="m"><b style="color:#7b61ff">Angela</b>This meeting is already 4 minutes behind schedule.<i>9:38</i></div>
+    <div class="m me">Michael, how long is this meeting going to be?<i>9:40</i></div>
+    <div class="m"><b style="color:#e8833a">Michael</b>That's what she said.<i>9:41</i></div>
+  </div>
+  <footer><div class="box">Type a message</div><div class="send">➤</div></footer>
+</main>
+</body></html>

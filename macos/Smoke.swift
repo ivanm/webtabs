@@ -246,6 +246,81 @@ extension App {
     return view as? WKWebView
   }
 
+  /// WEBTABS_SCREENSHOT=<file.png>: saves the 1280x800 window as it looks (title
+  /// bar, tab bar, current page) for the docs, then quits. AppKit draws the
+  /// chrome and WebKit snapshots the page, so no screen-recording permission is
+  /// needed. WEBTABS_SCREENSHOT_TAB picks the tab (1-based, default 1).
+  func screenshot(to path: String) {
+    // A fixed size for the docs, without touching the size saved for normal use.
+    window.setFrameAutosaveName("")
+    let top = window.frame.maxY
+    window.setFrame(
+      NSRect(x: window.frame.minX, y: top - 800, width: 1280, height: 800), display: true)
+    let number = Int(ProcessInfo.processInfo.environment["WEBTABS_SCREENSHOT_TAB"] ?? "") ?? 1
+    guard tabs.indices.contains(number - 1) else { smokeFail("no tab \(number)") }
+    let tv = tabs[number - 1]
+    select(tv)
+    // Time for every tab to load (badges, icons) and the page to settle.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+      // An active window, so the title bar buttons are drawn in colour.
+      self.showWindow()
+      guard let frame = self.window.contentView?.superview,
+        let chrome = frame.bitmapImageRepForCachingDisplay(in: frame.bounds)
+      else { self.smokeFail("screenshot") }
+      frame.cacheDisplay(in: frame.bounds, to: chrome)
+      tv.web.takeSnapshot(with: nil) { page, _ in
+        guard let page,
+          let out = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: chrome.pixelsWide, pixelsHigh: chrome.pixelsHigh,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { self.smokeFail("page snapshot") }
+        let bounds = frame.bounds
+        out.size = bounds.size
+        var pageRect = tv.web.convert(tv.web.bounds, to: frame)
+        if frame.isFlipped { pageRect.origin.y = bounds.height - pageRect.maxY }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
+        // Window corners as macOS draws them; outside stays transparent.
+        NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).addClip()
+        frame.effectiveAppearance.performAsCurrentDrawingAppearance {
+          NSColor.windowBackgroundColor.setFill()
+          bounds.fill()
+        }
+        chrome.draw(
+          in: bounds, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false,
+          hints: nil)
+        page.draw(in: pageRect)
+        // macOS won't hand focus to a background launch, so the title bar was
+        // drawn inactive: paint the buttons in their active colours.
+        let lights: [(NSWindow.ButtonType, UInt32)] = [
+          (.closeButton, 0xff5f57), (.miniaturizeButton, 0xfebc2e), (.zoomButton, 0x28c840),
+        ]
+        for (type, rgb) in lights {
+          guard let button = self.window.standardWindowButton(type) else { continue }
+          var r = button.convert(button.bounds, to: frame)
+          if frame.isFlipped { r.origin.y = bounds.height - r.maxY }
+          let d = min(r.width, r.height, 12)
+          NSColor(
+            srgbRed: CGFloat(rgb >> 16) / 255, green: CGFloat(rgb >> 8 & 0xff) / 255,
+            blue: CGFloat(rgb & 0xff) / 255, alpha: 1
+          ).setFill()
+          NSBezierPath(ovalIn: NSRect(x: r.midX - d / 2, y: r.midY - d / 2, width: d, height: d))
+            .fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        do {
+          try out.representation(using: .png, properties: [:])?.write(
+            to: URL(fileURLWithPath: path))
+          print("SCREENSHOT: \(path) (window active: \(self.window.isKeyWindow && NSApp.isActive))")
+        } catch {
+          self.smokeFail("screenshot: \(error.localizedDescription)")
+        }
+        NSApp.terminate(nil)
+      }
+    }
+  }
+
   func snapshot(_ view: NSView, _ name: String) {
     guard let dir = ProcessInfo.processInfo.environment["WEBTABS_SNAPSHOTS"] else { return }
     view.layoutSubtreeIfNeeded()

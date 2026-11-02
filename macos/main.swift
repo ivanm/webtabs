@@ -130,6 +130,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         if !self.smokeDone { self.smokeFail("WebKit timed out") }
       }
     }
+    if let path = ProcessInfo.processInfo.environment["WEBTABS_SCREENSHOT"] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.screenshot(to: path) }
+    }
   }
 
   /// A broken tabs.toml: don't run (saving from the UI would overwrite it).

@@ -104,6 +104,16 @@ target/release/WebTabs.app/Contents/MacOS/WebTabs --smoke-test
 
 Add `WEBTABS_SNAPSHOTS=<dir>` to save PNGs of the native windows it opens.
 
+**README screenshot.** `scripts/macos-screenshot.sh` (after `make build`) renders
+`docs/screenshot-macos.png` from the mock pages in `docs/screenshot/`: fictional
+chats, unread counts in their titles, the services' real icons, and a throwaway
+profile. It runs the app with `WEBTABS_SCREENSHOT=<file>`, which saves the
+1280×800 window (title bar, tab bar, the first tab's page;
+`WEBTABS_SCREENSHOT_TAB=<n>` picks another) and quits. AppKit draws the window and
+WebKit snapshots the page, so no Screen Recording permission is needed; macOS
+won't focus a background launch, so the title-bar buttons are painted in their
+active colours.
+
 Notifications use a page `Notification` bridge; service-worker push
 notifications are not supported. Pages are inspectable from Safari's Develop menu
 and with "Inspect Element".
@@ -168,6 +178,7 @@ Keychain access. It isn't notarized, and the Windows files aren't code-signed.
 |---|---|
 | `WEBTABS_CONFIG` | path to `tabs.toml` |
 | `WEBTABS_DATA` | data directory (browsing profiles, icons) |
+| `WEBTABS_SCREENSHOT`, `WEBTABS_SCREENSHOT_TAB` | macOS: save the window as a PNG and quit (see [README screenshot](#macos)) |
 | `WEBTABS_DEBUG=1` | Linux: page JS console to stdout. Windows: routing and notification trace to stderr |
 | `WEBKIT_DMABUF_RENDERER_FORCE_SHM`, `WEBKIT_DISABLE_DMABUF_RENDERER` | Linux renderer overrides (see [NVIDIA](#linux)) |
 | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` | Windows: extra WebView2 flags, e.g. `--disable-gpu` |

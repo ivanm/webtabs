@@ -1,0 +1,22 @@
+# The README screenshot's tabs (scripts/macos-screenshot.sh): local mock pages
+# with fictional content; unread counts come from their titles, icons from the
+# services' public icon files.
+[[tab]]
+name = "WhatsApp"
+url = "http://localhost:8766/whatsapp.html"
+
+[[tab]]
+name = "Slack"
+url = "http://localhost:8766/slack.html"
+
+[[tab]]
+name = "Gmail"
+url = "http://localhost:8766/gmail.html"
+
+[[tab]]
+name = "Calendar"
+url = "http://localhost:8766/calendar.html"
+
+[[tab]]
+name = "Telegram"
+url = "http://localhost:8766/telegram.html"
