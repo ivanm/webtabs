@@ -15,9 +15,9 @@ use webkit2gtk::{
     WebsiteDataManagerExt,
 };
 use webkit2gtk::{
-    CookiePersistentStorage, DeviceInfoPermissionRequest, MediaKeySystemPermissionRequest,
-    MemoryPressureSettings, NavigationPolicyDecision, NavigationType,
-    NotificationPermissionRequest, PermissionRequest, PointerLockPermissionRequest,
+    CookiePersistentStorage, DeviceInfoPermissionRequest, HardwareAccelerationPolicy,
+    MediaKeySystemPermissionRequest, MemoryPressureSettings, NavigationPolicyDecision,
+    NavigationType, NotificationPermissionRequest, PermissionRequest, PointerLockPermissionRequest,
     PolicyDecisionType, Settings, UserMediaPermissionRequest, WebContext,
     WebProcessTerminationReason, WebView, WebsiteDataAccessPermissionRequest, WebsiteDataManager,
 };
@@ -81,8 +81,20 @@ fn memory_pressure() -> MemoryPressureSettings {
     mp
 }
 
+thread_local! {
+    static GPU: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Fixed at startup: WebKit reads its renderer choice once per process.
+pub fn set_gpu_acceleration(on: bool) {
+    GPU.with(|g| g.set(on));
+}
+
 pub fn new_settings(user_agent: &str) -> Settings {
     let s = Settings::new();
+    if !GPU.with(|g| g.get()) {
+        s.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
     s.set_user_agent(Some(user_agent));
     s.set_enable_developer_extras(true);
     s.set_enable_media_stream(true);

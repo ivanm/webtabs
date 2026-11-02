@@ -106,6 +106,13 @@ pub fn open(app: &Rc<App>) {
         |c| c.unread_in_dock,
         |c, v| c.unread_in_dock = v,
     );
+    opt(
+        &general,
+        "GPU acceleration",
+        "Applies after restarting webtabs",
+        |c| c.gpu_acceleration,
+        |c, v| c.gpu_acceleration = v,
+    );
     // Closing to a tray that isn't there would make the app unreachable.
     close.set_sensitive(app.config.borrow().tray);
     app.settings_close_row.replace(Some(close.downgrade()));

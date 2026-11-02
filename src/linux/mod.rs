@@ -53,17 +53,25 @@ const CSS: &str = "
 
 pub fn run() -> std::process::ExitCode {
     let start_hidden = std::env::args().any(|a| a == "--hidden");
-    // WebKitGTK's DMA-BUF renderer can't share GBM buffers with the UI on the
-    // NVIDIA driver ("Failed to create GBM buffer") and every page renders blank.
-    // Disabling the renderer fixes that but drops to CPU-only painting (policy
-    // "never": WhatsApp scrolls at ~28 fps on an RTX 3080). Forcing shared-memory
-    // buffers keeps GPU rendering in the web process and only copies finished
-    // frames (60 fps). An explicit user setting of either variable wins.
-    if std::path::Path::new("/proc/driver/nvidia").exists()
-        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-        && std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none()
-    {
+    let gpu = config::Config::load_or_create(&config::config_path())
+        .map(|c| c.gpu_acceleration)
+        .unwrap_or(true);
+    web::set_gpu_acceleration(gpu);
+    // An explicit user setting of either WebKit variable wins.
+    let user_set = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+        || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some();
+    if !user_set && !gpu {
+        // CPU painting: the plain, driver-independent path.
         // SAFETY: still single-threaded; GTK and the web processes are not started yet.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    } else if !user_set && std::path::Path::new("/proc/driver/nvidia").exists() {
+        // WebKitGTK's DMA-BUF renderer can't share GBM buffers with the UI on the
+        // NVIDIA driver ("Failed to create GBM buffer") and every page renders
+        // blank. Disabling the renderer fixes that but drops to CPU-only painting
+        // (WhatsApp scrolls at ~28 fps on an RTX 3080). Forcing shared-memory
+        // buffers keeps GPU rendering in the web process and only copies
+        // finished frames (60 fps).
+        // SAFETY: as above.
         unsafe { std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1") };
     }
     glib::set_prgname(Some("webtabs"));

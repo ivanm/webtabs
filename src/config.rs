@@ -34,6 +34,7 @@ const HEADER: &str = "\
 # close_to_tray   = true    # closing the window keeps the app running in the tray
 # unread_in_title = true    # total unread count in the window title
 # unread_in_dock  = true    # unread count on the Dock / launcher icon
+# gpu_acceleration = true   # Linux: draw pages on the GPU (restart to apply)
 # user_agent      = \"...\"   # global user-agent override (default: Safari)
 #
 # [[tab]]
@@ -60,6 +61,11 @@ pub struct Config {
     /// panels that support `com.canonical.Unity.LauncherEntry`).
     #[serde(default = "default_true")]
     pub unread_in_dock: bool,
+    /// Linux: render pages on the GPU. Off falls back to CPU painting, an escape
+    /// hatch for driver trouble. Read once at startup. Written only when off, so
+    /// the macOS bridge (which doesn't know it) never sees it.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub gpu_acceleration: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     #[serde(default, rename = "tab")]
@@ -101,6 +107,7 @@ impl Default for Config {
             close_to_tray: true,
             unread_in_title: true,
             unread_in_dock: true,
+            gpu_acceleration: true,
             user_agent: None,
             tabs: vec![
                 tab("WhatsApp", "https://web.whatsapp.com"),
@@ -344,6 +351,15 @@ mod tests {
         let off = Config::parse("unread_in_dock = false\n").unwrap();
         assert!(!off.unread_in_dock);
         assert_eq!(Config::parse(&off.to_toml()).unwrap(), off);
+        assert!(cfg.gpu_acceleration);
+        assert!(
+            !cfg.to_toml()
+                .lines()
+                .any(|l| l.starts_with("gpu_acceleration"))
+        );
+        let cpu = Config::parse("gpu_acceleration = false\n").unwrap();
+        assert!(!cpu.gpu_acceleration);
+        assert_eq!(Config::parse(&cpu.to_toml()).unwrap(), cpu);
         assert!(!cfg.tray);
         assert!(!cfg.tabs[0].notifications);
         assert!(cfg.tabs[1].notifications);
