@@ -50,10 +50,20 @@ pub fn user_agent_override<'a>(cfg: &'a Config, tab: &'a Tab) -> Option<&'a str>
     tab.user_agent.as_deref().or(cfg.user_agent.as_deref())
 }
 
-pub fn create_environment(done: impl FnOnce(Result<ICoreWebView2Environment, String>) + 'static) {
+/// `gpu: false` starts the browser with `--disable-gpu` (CPU drawing), the
+/// failsafe behind the "GPU acceleration" switch. It is fixed for the browser
+/// process's lifetime, so the switch applies after a restart.
+pub fn create_environment(
+    gpu: bool,
+    done: impl FnOnce(Result<ICoreWebView2Environment, String>) + 'static,
+) {
     let dir = user_data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let options = CoreWebView2EnvironmentOptions::default();
+    if !gpu {
+        // SAFETY: the options object is ours and not shared yet.
+        unsafe { options.set_additional_browser_arguments("--disable-gpu".into()) };
+    }
     let done = Rc::new(RefCell::new(Some(done)));
     let finish = done.clone();
     let handler =

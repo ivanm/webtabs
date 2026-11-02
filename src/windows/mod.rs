@@ -68,6 +68,7 @@ const CMD_CLOSE_TO_TRAY: u32 = 4;
 const CMD_UNREAD_TITLE: u32 = 5;
 const CMD_TRAY: u32 = 6;
 const CMD_QUIT: u32 = 7;
+const CMD_GPU: u32 = 8;
 const CMD_RELOAD: u32 = 20;
 const CMD_HOME: u32 = 21;
 const CMD_LEFT: u32 = 22;
@@ -415,7 +416,8 @@ impl App {
                 let _ = UpdateWindow(self.hwnd);
             }
         }
-        web::create_environment(move |result| {
+        let gpu = self.config.borrow().gpu_acceleration;
+        web::create_environment(gpu, move |result| {
             let Some(app) = app() else { return };
             match result {
                 Ok(env) => {
@@ -1391,6 +1393,12 @@ impl App {
                 CMD_CLOSE_TO_TRAY as usize,
                 w!("Closing the window keeps webtabs in the tray"),
             );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(cfg.gpu_acceleration),
+                CMD_GPU as usize,
+                w!("GPU acceleration (applies after restarting webtabs)"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, w!("Quit\tCtrl+Q"));
         }
@@ -1401,6 +1409,7 @@ impl App {
             CMD_UNREAD_TITLE => self.update_options(|c| c.unread_in_title = !c.unread_in_title),
             CMD_TRAY => self.update_options(|c| c.tray = !c.tray),
             CMD_CLOSE_TO_TRAY => self.update_options(|c| c.close_to_tray = !c.close_to_tray),
+            CMD_GPU => self.update_options(|c| c.gpu_acceleration = !c.gpu_acceleration),
             CMD_QUIT => self.quit(),
             _ => {}
         }

@@ -34,7 +34,7 @@ const HEADER: &str = "\
 # close_to_tray   = true    # closing the window keeps the app running in the tray
 # unread_in_title = true    # total unread count in the window title
 # unread_in_dock  = true    # unread count on the Dock / launcher icon
-# gpu_acceleration = true   # Linux: draw pages on the GPU (restart to apply)
+# gpu_acceleration = true   # Linux/Windows: draw pages on the GPU (restart to apply)
 # user_agent      = \"...\"   # global user-agent override (default: Safari)
 #
 # [[tab]]
@@ -61,7 +61,7 @@ pub struct Config {
     /// panels that support `com.canonical.Unity.LauncherEntry`).
     #[serde(default = "default_true")]
     pub unread_in_dock: bool,
-    /// Linux: render pages on the GPU. Off falls back to CPU painting, an escape
+    /// Linux and Windows: render pages on the GPU. Off falls back to CPU painting, an escape
     /// hatch for driver trouble. Read once at startup. Written only when off, so
     /// the macOS bridge (which doesn't know it) never sees it.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
