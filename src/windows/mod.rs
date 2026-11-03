@@ -127,7 +127,7 @@ pub fn run() -> std::process::ExitCode {
             app.start(start_hidden);
         }
         Err(e) => {
-            error_box("webtabs could not start", &e);
+            error_box("WebTabs could not start", &e);
             return std::process::ExitCode::FAILURE;
         }
     }
@@ -331,7 +331,7 @@ impl App {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 CLASS,
-                w!("webtabs"),
+                w!("WebTabs"),
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -444,7 +444,7 @@ impl App {
                     app.load_tabs_progressively();
                 }
                 Err(e) => {
-                    error_box("webtabs: WebView2 is not available", &e);
+                    error_box("WebTabs: WebView2 is not available", &e);
                     app.quit();
                 }
             }
@@ -1337,9 +1337,9 @@ impl App {
         let any = views.iter().any(|t| t.badge.get().is_unread());
         let in_title = self.config.borrow().unread_in_title;
         let title = if total > 0 && in_title {
-            format!("webtabs ({total})")
+            format!("WebTabs ({total})")
         } else {
-            "webtabs".into()
+            "WebTabs".into()
         };
         unsafe {
             let _ = SetWindowTextW(self.hwnd, &HSTRING::from(title));
@@ -1456,7 +1456,7 @@ impl App {
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = self.tray_icon;
-        fill(&mut nid.szTip, "webtabs");
+        fill(&mut nid.szTip, "WebTabs");
         unsafe {
             if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
                 nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -1487,9 +1487,9 @@ impl App {
             self.tray_icon
         };
         let tip = match total {
-            0 if any_unread => "webtabs \u{2014} new activity".to_string(),
-            0 => "webtabs".to_string(),
-            n => format!("webtabs \u{2014} {n} unread"),
+            0 if any_unread => "WebTabs \u{2014} new activity".to_string(),
+            0 => "WebTabs".to_string(),
+            n => format!("WebTabs \u{2014} {n} unread"),
         };
         fill(&mut nid.szTip, &tip);
         unsafe {
@@ -1654,7 +1654,7 @@ impl App {
             hwndParent: owner,
             dwFlags: TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION,
             dwCommonButtons: TDCBF_CANCEL_BUTTON,
-            pszWindowTitle: w!("webtabs"),
+            pszWindowTitle: w!("WebTabs"),
             pszMainInstruction: PCWSTR(title.as_ptr()),
             pszContent: if session.is_some() {
                 PCWSTR(detail.as_ptr())
@@ -1755,7 +1755,7 @@ impl App {
         let new = match Config::parse(&text) {
             Ok(c) => c,
             Err(e) => {
-                self.show_balloon("webtabs: tabs.toml not applied", &e);
+                self.show_balloon("WebTabs: tabs.toml not applied", &e);
                 return;
             }
         };

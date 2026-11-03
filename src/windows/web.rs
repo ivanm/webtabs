@@ -484,7 +484,7 @@ fn open_popup(
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             POPUP_CLASS,
-            w!("webtabs"),
+            w!("WebTabs"),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -589,7 +589,7 @@ fn setup_popup(
         if let Some(wv) = sender {
             let t = title(&wv);
             let t = if t.is_empty() {
-                "webtabs".to_string()
+                "WebTabs".to_string()
             } else {
                 t
             };
