@@ -1,6 +1,6 @@
 # Packages the Windows release into target\dist:
 #   WebTabs-<version>-windows-x64.msi   per-user installer (WiX v5)
-#   webtabs-<version>-windows-x64.zip   portable: webtabs.exe + README.md
+#   webtabs-<version>-windows-x64.zip   portable: webtabs.exe + README.md + LICENSE
 #   SHA256SUMS-windows
 # Needs the Rust MSVC toolchain, the Windows SDK and WiX:
 #   dotnet tool install --global wix --version 5.0.2
@@ -39,6 +39,7 @@ $name = "webtabs-$Version-windows-x64"
 $stage = "$dist\$name"
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $exe, README.md $stage
+if (Test-Path LICENSE) { Copy-Item LICENSE $stage }
 $zip = "$dist\$name.zip"
 Compress-Archive -Path $stage -DestinationPath $zip -Force
 Remove-Item $stage -Recurse -Force

@@ -14,11 +14,13 @@ macro_rules! debug {
 }
 
 mod autostart;
+mod chrome;
 mod icons;
 mod paint;
 mod panel;
 mod web;
 
+use crate::appearance::{BarMetrics, Tint};
 use crate::badge::Badge;
 use crate::config::{self, Config, Tab};
 use crate::{favicon, links};
@@ -125,7 +127,7 @@ pub fn run() -> std::process::ExitCode {
             app.start(start_hidden);
         }
         Err(e) => {
-            error_box("webtabs could not start", &e);
+            error_box("WebTabs could not start", &e);
             return std::process::ExitCode::FAILURE;
         }
     }
@@ -197,6 +199,10 @@ pub enum Hit {
     Tab(usize),
     Add,
     Gear,
+    /// The caption buttons, drawn by the app (the system title bar is gone).
+    Minimize,
+    Maximize,
+    Close,
 }
 
 /// App shortcuts. Reload, zoom, back/forward, find and DevTools are WebView2's own.
@@ -260,7 +266,17 @@ pub struct App {
     current: Cell<u64>,
     next_id: Cell<u64>,
     hover: Cell<Option<Hit>>,
+    /// The tile under a held mouse button (drawn pressed while hovered).
+    pressed: Cell<Option<Hit>>,
     tracking_mouse: Cell<bool>,
+    /// Hovering the caption buttons (non-client area).
+    tracking_nc: Cell<bool>,
+    /// The window is the active one (caption glyphs dim when not).
+    active: Cell<bool>,
+    /// Apps use the dark theme (followed live).
+    dark: Cell<bool>,
+    taskbar: chrome::Taskbar,
+    taskbar_button_created: u32,
     tray_added: Cell<bool>,
     tray_icon: HICON,
     tray_icon_unread: HICON,
@@ -315,7 +331,7 @@ impl App {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 CLASS,
-                w!("webtabs"),
+                w!("WebTabs"),
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -349,9 +365,11 @@ impl App {
                 work.top + (work.bottom - work.top - h) / 2,
                 w,
                 h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                // FRAMECHANGED: recompute the frame without the system title bar.
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
+        chrome::set_dark_frame(hwnd, chrome::system_dark());
         let tooltip = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST,
@@ -382,7 +400,13 @@ impl App {
             current: Cell::new(0),
             next_id: Cell::new(1),
             hover: Cell::new(None),
+            pressed: Cell::new(None),
             tracking_mouse: Cell::new(false),
+            tracking_nc: Cell::new(false),
+            active: Cell::new(true),
+            dark: Cell::new(chrome::system_dark()),
+            taskbar: chrome::Taskbar::default(),
+            taskbar_button_created: unsafe { RegisterWindowMessageW(w!("TaskbarButtonCreated")) },
             tray_added: Cell::new(false),
             tray_icon: load_icon(1, small),
             tray_icon_unread: load_icon(2, small),
@@ -420,7 +444,7 @@ impl App {
                     app.load_tabs_progressively();
                 }
                 Err(e) => {
-                    error_box("webtabs: WebView2 is not available", &e);
+                    error_box("WebTabs: WebView2 is not available", &e);
                     app.quit();
                 }
             }
@@ -446,8 +470,31 @@ impl App {
         rc
     }
 
+    fn metrics(&self) -> BarMetrics {
+        BarMetrics::new(self.config.borrow().icon_size)
+    }
+
+    /// The bar's colours: the tint (or Windows' own) in the current theme.
+    fn theme(&self) -> paint::Theme {
+        let dark = self.dark.get();
+        let tint = Tint::parse(self.config.borrow().tint.as_deref());
+        paint::Theme {
+            bar: tint.map(|t| t.color(dark)).unwrap_or(if dark {
+                paint::BAR_DARK
+            } else {
+                paint::BAR_LIGHT
+            }),
+            light_text: tint.map(|t| t.light_text(dark)).unwrap_or(dark),
+            dark,
+        }
+    }
+
+    fn is_zoomed(&self) -> bool {
+        unsafe { IsZoomed(self.hwnd).as_bool() }
+    }
+
     fn bar_height(&self) -> i32 {
-        self.px(paint::BAR_H)
+        self.px(self.metrics().height)
     }
 
     fn content_rect(&self) -> RECT {
@@ -458,24 +505,45 @@ impl App {
 
     fn cell_rect(&self, hit: Hit) -> RECT {
         let px = |v| self.px(v);
-        let (y, size) = (px(paint::CELL_Y), px(paint::CELL));
-        let x = match hit {
-            Hit::Tab(i) => px(paint::PAD_X) + i as i32 * px(paint::CELL + paint::GAP),
-            Hit::Add => {
-                px(paint::PAD_X)
-                    + self.tabs.borrow().len() as i32 * px(paint::CELL + paint::GAP)
-                    + px(4)
-            }
-            Hit::Gear => self.client().right - px(paint::PAD_X) - size,
+        let m = self.metrics();
+        let (tile, step) = (px(m.tile), px(m.tile + m.gap));
+        let tile_top = px(m.tile_y);
+        let right = self.client().right;
+        let caption = px(paint::CAPTION_W);
+        let tool = px(paint::TOOL);
+        // The + and settings tiles share the tabs' centre line.
+        let tool_top = tile_top + (tile - tool) / 2;
+        let square = |left: i32, top: i32, size: i32| RECT {
+            left,
+            top,
+            right: left + size,
+            bottom: top + size,
         };
-        RECT {
-            left: x,
-            top: y,
-            right: x + size,
-            bottom: y + size,
+        match hit {
+            Hit::Tab(i) => square(px(paint::PAD_X) + i as i32 * step, tile_top, tile),
+            Hit::Add => square(
+                px(paint::PAD_X) + self.tabs.borrow().len() as i32 * step,
+                tool_top,
+                tool,
+            ),
+            Hit::Gear => square(right - 3 * caption - px(6) - tool, tool_top, tool),
+            Hit::Minimize | Hit::Maximize | Hit::Close => {
+                let slot = match hit {
+                    Hit::Minimize => 3,
+                    Hit::Maximize => 2,
+                    _ => 1,
+                };
+                RECT {
+                    left: right - slot * caption,
+                    top: 0,
+                    right: right - (slot - 1) * caption,
+                    bottom: self.bar_height(),
+                }
+            }
         }
     }
 
+    /// The tab bar's own controls (client area).
     fn hit_test(&self, x: i32, y: i32) -> Option<Hit> {
         if y >= self.bar_height() {
             return None;
@@ -486,6 +554,97 @@ impl App {
             .map(Hit::Tab)
             .chain([Hit::Add, Hit::Gear])
             .find(|h| inside(self.cell_rect(*h)))
+    }
+
+    /// The caption buttons (non-client area: Windows 11 shows snap layouts
+    /// over HTMAXBUTTON).
+    fn caption_hit(&self, x: i32, y: i32) -> Option<Hit> {
+        let inside = |r: RECT| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+        [Hit::Minimize, Hit::Maximize, Hit::Close]
+            .into_iter()
+            .find(|h| inside(self.cell_rect(*h)))
+    }
+
+    /// WM_NCHITTEST: the system resolves the side and bottom borders; the top
+    /// edge, the caption buttons and the draggable bar are ours.
+    fn nc_hit_test(&self, lparam: LPARAM) -> LRESULT {
+        let def = unsafe { DefWindowProcW(self.hwnd, WM_NCHITTEST, WPARAM(0), lparam) };
+        let (sx, sy) = point(lparam);
+        let mut pt = POINT { x: sx, y: sy };
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut pt);
+        }
+        let border = if self.is_zoomed() {
+            0
+        } else {
+            chrome::frame_thickness(self.hwnd)
+        };
+        let on_control = self.hit_test(pt.x, pt.y).is_some();
+        // Over a tab the resize band shrinks to the space above its tile.
+        let band = if on_control {
+            border.min(self.px(self.metrics().tile_y))
+        } else {
+            border
+        };
+        let top = pt.y < band;
+        let code = match def.0 as u32 {
+            HTLEFT if top => HTTOPLEFT,
+            HTRIGHT if top => HTTOPRIGHT,
+            HTCLIENT if top => HTTOP,
+            HTCLIENT => match self.caption_hit(pt.x, pt.y) {
+                Some(Hit::Minimize) => HTMINBUTTON,
+                Some(Hit::Maximize) => HTMAXBUTTON,
+                Some(Hit::Close) => HTCLOSE,
+                _ if pt.y < self.bar_height() && !on_control => HTCAPTION,
+                _ => HTCLIENT,
+            },
+            other => other,
+        };
+        LRESULT(code as isize)
+    }
+
+    fn caption_for(code: u32) -> Option<Hit> {
+        match code {
+            HTMINBUTTON => Some(Hit::Minimize),
+            HTMAXBUTTON => Some(Hit::Maximize),
+            HTCLOSE => Some(Hit::Close),
+            _ => None,
+        }
+    }
+
+    fn caption_action(&self, hit: Hit) {
+        unsafe {
+            match hit {
+                Hit::Minimize => {
+                    let _ = ShowWindow(self.hwnd, SW_MINIMIZE);
+                }
+                Hit::Maximize => {
+                    let _ = ShowWindow(
+                        self.hwnd,
+                        if self.is_zoomed() {
+                            SW_RESTORE
+                        } else {
+                            SW_MAXIMIZE
+                        },
+                    );
+                }
+                Hit::Close => {
+                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The bar's look changed (icon size, tint, theme): redraw and move the
+    /// pages under a possibly taller bar.
+    fn apply_appearance(&self) {
+        self.layout();
+        self.sync_tooltips();
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+        panel::appearance_changed();
     }
 
     fn invalidate_bar(&self) {
@@ -948,6 +1107,24 @@ impl App {
         self.save();
     }
 
+    /// Drag-to-reorder in settings: puts the tab at position `to`.
+    fn move_tab_to(&self, tv: &Rc<TabView>, to: usize) {
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let Some(from) = tabs.iter().position(|t| t.id == tv.id) else {
+                return;
+            };
+            let to = to.min(tabs.len() - 1);
+            if from == to {
+                return;
+            }
+            let moved = tabs.remove(from);
+            tabs.insert(to, moved);
+        }
+        self.after_tabs_changed();
+        self.save();
+    }
+
     fn after_tabs_changed(&self) {
         self.sync_tooltips();
         self.invalidate_bar();
@@ -1160,14 +1337,21 @@ impl App {
         let any = views.iter().any(|t| t.badge.get().is_unread());
         let in_title = self.config.borrow().unread_in_title;
         let title = if total > 0 && in_title {
-            format!("webtabs ({total})")
+            format!("WebTabs ({total})")
         } else {
-            "webtabs".into()
+            "WebTabs".into()
         };
         unsafe {
             let _ = SetWindowTextW(self.hwnd, &HSTRING::from(title));
         }
         self.update_tray(any, total);
+        // The taskbar button's badge: the total, or a dot for activity without one.
+        let badge = match (self.config.borrow().unread_in_dock, total, any) {
+            (false, _, _) | (true, 0, false) => Badge::None,
+            (true, 0, true) => Badge::Dot,
+            (true, n, _) => Badge::Count(n),
+        };
+        self.taskbar.set(self.hwnd, badge);
         if total > self.last_unread.get() && !self.is_active() {
             // Taskbar attention, like GTK's urgency hint.
             let info = FLASHWINFO {
@@ -1272,7 +1456,7 @@ impl App {
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = self.tray_icon;
-        fill(&mut nid.szTip, "webtabs");
+        fill(&mut nid.szTip, "WebTabs");
         unsafe {
             if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
                 nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -1303,9 +1487,9 @@ impl App {
             self.tray_icon
         };
         let tip = match total {
-            0 if any_unread => "webtabs \u{2014} new activity".to_string(),
-            0 => "webtabs".to_string(),
-            n => format!("webtabs \u{2014} {n} unread"),
+            0 if any_unread => "WebTabs \u{2014} new activity".to_string(),
+            0 => "WebTabs".to_string(),
+            n => format!("WebTabs \u{2014} {n} unread"),
         };
         fill(&mut nid.szTip, &tip);
         unsafe {
@@ -1470,7 +1654,7 @@ impl App {
             hwndParent: owner,
             dwFlags: TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION,
             dwCommonButtons: TDCBF_CANCEL_BUTTON,
-            pszWindowTitle: w!("webtabs"),
+            pszWindowTitle: w!("WebTabs"),
             pszMainInstruction: PCWSTR(title.as_ptr()),
             pszContent: if session.is_some() {
                 PCWSTR(detail.as_ptr())
@@ -1515,6 +1699,13 @@ impl App {
         self.save();
     }
 
+    /// Applies a change without writing tabs.toml (the icon size slider and the
+    /// colour picker; the settings window saves once they settle).
+    fn preview_options(&self, f: impl FnOnce(&mut Config)) {
+        f(&mut self.config.borrow_mut());
+        self.apply_options();
+    }
+
     fn apply_options(&self) {
         if self.config.borrow().tray {
             self.add_tray();
@@ -1525,6 +1716,7 @@ impl App {
             }
         }
         self.refresh_unread();
+        self.apply_appearance();
     }
 
     fn save(&self) {
@@ -1563,7 +1755,7 @@ impl App {
         let new = match Config::parse(&text) {
             Ok(c) => c,
             Err(e) => {
-                self.show_balloon("webtabs: tabs.toml not applied", &e);
+                self.show_balloon("WebTabs: tabs.toml not applied", &e);
                 return;
             }
         };
@@ -1617,7 +1809,74 @@ impl App {
             WM_SIZE => {
                 self.layout();
                 self.sync_tooltips();
+                // The caption buttons move, and maximize turns into restore.
                 self.invalidate_bar();
+            }
+            WM_NCHITTEST => return Some(self.nc_hit_test(lparam)),
+            // Keep DWM from painting a system caption over ours on (de)activation.
+            WM_NCACTIVATE => {
+                return Some(unsafe { DefWindowProcW(self.hwnd, msg, wparam, LPARAM(-1)) });
+            }
+            WM_NCMOUSEMOVE => {
+                if !self.tracking_nc.replace(true) {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE | TME_NONCLIENT,
+                        hwndTrack: self.hwnd,
+                        dwHoverTime: 0,
+                    };
+                    unsafe {
+                        let _ = TrackMouseEvent(&mut tme);
+                    }
+                }
+                let hit = Self::caption_for(wparam.0 as u32);
+                if self.hover.get() != hit {
+                    if hit.is_none() {
+                        self.pressed.set(None);
+                    }
+                    self.set_hover(hit);
+                }
+                hit?; // caption and borders: the system's
+            }
+            WM_NCMOUSELEAVE => {
+                self.tracking_nc.set(false);
+                if matches!(
+                    self.hover.get(),
+                    Some(Hit::Minimize | Hit::Maximize | Hit::Close)
+                ) {
+                    self.pressed.set(None);
+                    self.set_hover(None);
+                }
+            }
+            // Our caption buttons: the system's would draw Windows 7 ones.
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+                let hit = Self::caption_for(wparam.0 as u32)?;
+                self.pressed.set(Some(hit));
+                self.invalidate_bar();
+            }
+            WM_NCLBUTTONUP => {
+                let hit = Self::caption_for(wparam.0 as u32)?;
+                let clicked = self.pressed.replace(None) == Some(hit);
+                self.invalidate_bar();
+                if clicked {
+                    self.caption_action(hit);
+                }
+            }
+            WM_SETTINGCHANGE => {
+                // Light/dark app mode switched in Settings › Personalization.
+                let area = if lparam.0 == 0 {
+                    String::new()
+                } else {
+                    unsafe { PCWSTR(lparam.0 as *const u16).to_string() }.unwrap_or_default()
+                };
+                if area == "ImmersiveColorSet" {
+                    let dark = chrome::system_dark();
+                    if self.dark.replace(dark) != dark {
+                        chrome::set_dark_frame(self.hwnd, dark);
+                        self.apply_appearance();
+                    }
+                }
+                return None;
             }
             WM_MOVE | WM_MOVING => {
                 for tv in self.all_views() {
@@ -1643,6 +1902,8 @@ impl App {
                 }
             }
             WM_ACTIVATE => {
+                self.active.set((wparam.0 & 0xffff) as u32 != WA_INACTIVE);
+                self.invalidate_bar();
                 if (wparam.0 & 0xffff) as u32 != WA_INACTIVE {
                     let info = FLASHWINFO {
                         cbSize: size_of::<FLASHWINFO>() as u32,
@@ -1691,15 +1952,32 @@ impl App {
             }
             WM_MOUSELEAVE => {
                 self.tracking_mouse.set(false);
-                self.set_hover(None);
+                if !matches!(
+                    self.hover.get(),
+                    Some(Hit::Minimize | Hit::Maximize | Hit::Close)
+                ) {
+                    self.pressed.set(None);
+                    self.set_hover(None);
+                }
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = point(lparam);
+                self.pressed.set(self.hit_test(x, y));
+                self.invalidate_bar();
             }
             WM_LBUTTONUP => {
                 let (x, y) = point(lparam);
-                match self.hit_test(x, y) {
+                let down = self.pressed.replace(None);
+                self.invalidate_bar();
+                let hit = self.hit_test(x, y);
+                if hit != down {
+                    return Some(LRESULT(0)); // released elsewhere: no click
+                }
+                match hit {
                     Some(Hit::Tab(i)) => self.select_index(i),
                     Some(Hit::Add) => panel::open(self, panel::Open::Add),
                     Some(Hit::Gear) => panel::open(self, panel::Open::Settings),
-                    None => {}
+                    _ => {}
                 }
             }
             WM_RBUTTONUP => {
@@ -1753,6 +2031,11 @@ impl App {
                 self.remove_tray();
                 unsafe { PostQuitMessage(0) };
             }
+            m if m == self.taskbar_button_created && m != 0 => {
+                // The taskbar button exists (again): it can carry the badge now.
+                self.taskbar.connect();
+                self.refresh_unread();
+            }
             m if m == self.taskbar_created && m != 0 => {
                 // Explorer restarted: the tray icon is gone, put it back.
                 self.tray_added.set(false);
@@ -1764,7 +2047,32 @@ impl App {
     }
 }
 
+/// The client area takes the whole window but the side and bottom sizing
+/// borders: the tab bar is the title bar. Handled before the app exists too,
+/// since the window gets it while being created.
+fn nc_calc_size(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if wparam.0 == 0 {
+        return unsafe { DefWindowProcW(hwnd, WM_NCCALCSIZE, wparam, lparam) };
+    }
+    let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+    unsafe {
+        let top = (*params).rgrc[0].top;
+        let r = DefWindowProcW(hwnd, WM_NCCALCSIZE, wparam, lparam);
+        // A maximized window hangs its frame off-screen: keep the bar on it.
+        (*params).rgrc[0].top = top
+            + if IsZoomed(hwnd).as_bool() {
+                chrome::frame_thickness(hwnd)
+            } else {
+                0
+            };
+        r
+    }
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_NCCALCSIZE {
+        return nc_calc_size(hwnd, wparam, lparam);
+    }
     // A message for a window being destroyed may arrive while the app is borrowed
     // during startup/shutdown; fall back to the default handling then.
     if let Some(app) = app().filter(|a| a.hwnd == hwnd)
