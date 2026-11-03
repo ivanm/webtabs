@@ -38,9 +38,23 @@ extension App {
         self.smokeFail("title badge")
       }
       self.window.contentView?.layoutSubtreeIfNeeded()
-      guard tv.button.frame.size == NSSize(width: 52, height: 44),
+      guard tv.button.frame.size == NSSize(width: 32, height: TitleBar.height),
         self.tabStack.arrangedSubviews.count == self.tabs.count, tv.button.isActive
       else { self.smokeFail("tab bar layout") }
+      // Tabs live in the title bar: a click there must reach the tab, not the
+      // title bar, and the traffic lights sit centred beside them.
+      let frameView = self.window.contentView!.superview!
+      let tabCenter = tv.button.convert(NSPoint(x: 16, y: 19), to: nil)
+      guard frameView.hitTest(tabCenter) === tv.button else {
+        self.smokeFail("clicks on a tab go to \(String(describing: frameView.hitTest(tabCenter)))")
+      }
+      if let close = self.window.standardWindowButton(.closeButton) {
+        let mid = close.convert(NSPoint(x: close.bounds.midX, y: close.bounds.midY), to: nil).y
+        let barMid = self.window.frame.height - TitleBar.height / 2
+        guard abs(mid - barMid) < 1.5 else {
+          self.smokeFail("traffic lights at y \(mid), bar centre \(barMid)")
+        }
+      }
       let titles = self.tabMenu(tv).items.map(\.title)
       guard titles.first == "Reload", titles.contains("Edit…"), titles.contains("Settings…") else {
         self.smokeFail("tab menu: \(titles)")

@@ -1,11 +1,45 @@
 import AppKit
 
-/// A flat rounded tile that lights up on hover and while active: the look of the
-/// Linux `.tabbar button` CSS. Tabs, the bar's + and gear, presets and the
-/// settings row buttons are all tiles.
+/// The brand orange (the square in the app icon), for the active-tab marker.
+extension NSColor {
+  static let webtabsAccent = NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      ? NSColor(srgbRed: 1, green: 0x6A / 255, blue: 0x2B / 255, alpha: 1)
+      : NSColor(srgbRed: 0xF0 / 255, green: 0x52 / 255, blue: 0x0F / 255, alpha: 1)
+  }
+  /// Unread bubbles: white text on it passes WCAG AA at 10 pt bold.
+  static let webtabsBadge = NSColor(srgbRed: 0xD9 / 255, green: 0x30 / 255, blue: 0x36 / 255, alpha: 1)
+}
+
+/// The tab bar, laid into the macOS title bar (the window's content runs under
+/// a transparent one). Empty space drags the window and a double-click zooms
+/// or minimizes, as the user set for real title bars.
+final class TitleBar: NSView {
+  /// The compact title bar's height (the window's empty toolbar sets it).
+  static let height: CGFloat = 40
+
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.windowBackgroundColor.setFill()
+    bounds.fill()
+  }
+  override var mouseDownCanMoveWindow: Bool { true }
+  override func mouseDown(with event: NSEvent) {
+    guard event.clickCount == 2 else { return super.mouseDown(with: event) }
+    switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+    case "Minimize": window?.performMiniaturize(nil)
+    case "None": break
+    default: window?.performZoom(nil)
+    }
+  }
+}
+
+/// A flat rounded tile that lights up on hover and while active. Tabs, the
+/// bar's + and settings, presets and the settings row buttons are all tiles.
 class Tile: NSView {
   var onClick: (() -> Void)?
   var radius: CGFloat = 10
+  /// Where the highlight is drawn; the whole view unless set.
+  var backgroundRect: NSRect?
   var isActive = false {
     didSet { needsDisplay = true }
   }
@@ -74,10 +108,10 @@ class Tile: NSView {
 
   override func draw(_ dirtyRect: NSRect) {
     let alpha: CGFloat =
-      pressed ? 0.22 : isActive ? 0.16 : (hovering && isEnabled) ? 0.08 : 0
+      pressed ? 0.12 : isActive ? 0.08 : (hovering && isEnabled) ? 0.05 : 0
     guard alpha > 0 else { return }
     NSColor.labelColor.withAlphaComponent(alpha).setFill()
-    NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    NSBezierPath(roundedRect: backgroundRect ?? bounds, xRadius: radius, yRadius: radius).fill()
   }
 
   // Keyboard: reachable with Full Keyboard Access; Space or Return presses it.
@@ -90,9 +124,9 @@ class Tile: NSView {
       super.keyDown(with: event)
     }
   }
-  override var focusRingMaskBounds: NSRect { bounds }
+  override var focusRingMaskBounds: NSRect { backgroundRect ?? bounds }
   override func drawFocusRingMask() {
-    NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    NSBezierPath(roundedRect: backgroundRect ?? bounds, xRadius: radius, yRadius: radius).fill()
   }
 
   override func isAccessibilityElement() -> Bool { true }
@@ -134,41 +168,55 @@ final class SymbolTile: Tile {
   }
 }
 
-/// A tab in the bar: the site icon with the unread bubble pinned top-right and an
-/// optional tag bottom-left, to tell same-service tabs apart (Linux `create_tab`).
+/// A tab in the title bar: the site icon in a 32 pt tile, the unread bubble
+/// top-right, an optional tag bottom-left (to tell same-service tabs apart) and,
+/// when active, a short orange marker under the tile.
 final class TabButton: Tile {
+  static let tile = NSRect(x: 0, y: 3, width: 32, height: 32)
   let icon = NSImageView()
+  /// Rings in the bar's colour, so bubble and tag sit cut into the icon.
   let badge = Pill(
-    color: NSColor(srgbRed: 0xe5 / 255, green: 0x48 / 255, blue: 0x4d / 255, alpha: 1),
-    font: .boldSystemFont(ofSize: 10), height: 16, padding: 4)
+    color: .webtabsBadge, font: .boldSystemFont(ofSize: 10), height: 16, padding: 4,
+    ring: .windowBackgroundColor, ringWidth: 2)
   let tagPill = Pill(
-    color: NSColor(srgbRed: 0x3b / 255, green: 0x82 / 255, blue: 0xf6 / 255, alpha: 1),
-    font: .boldSystemFont(ofSize: 9), height: 13, padding: 3, radius: 5)
+    color: .labelColor, font: .systemFont(ofSize: 8, weight: .heavy), height: 13, padding: 3,
+    radius: 4, textColor: .windowBackgroundColor, ring: .windowBackgroundColor, ringWidth: 1.5)
   var onMenu: (() -> NSMenu?)?
   var onMiddleClick: (() -> Void)?
 
   init() {
-    super.init(size: NSSize(width: 52, height: 44))
+    super.init(size: NSSize(width: 32, height: TitleBar.height))
+    radius = 8
+    backgroundRect = Self.tile
     icon.imageScaling = .scaleProportionallyUpOrDown
     for view in [icon, badge, tagPill] as [NSView] {
       view.translatesAutoresizingMaskIntoConstraints = false
       addSubview(view)
     }
     NSLayoutConstraint.activate([
-      icon.widthAnchor.constraint(equalToConstant: 32),
-      icon.heightAnchor.constraint(equalToConstant: 32),
-      icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
-      icon.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-      badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-      badge.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-      tagPill.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
-      tagPill.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+      icon.widthAnchor.constraint(equalToConstant: 22),
+      icon.heightAnchor.constraint(equalToConstant: 22),
+      icon.centerXAnchor.constraint(equalTo: leadingAnchor, constant: Self.tile.midX),
+      icon.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.tile.midY),
+      badge.trailingAnchor.constraint(equalTo: leadingAnchor, constant: Self.tile.maxX + 6),
+      badge.topAnchor.constraint(equalTo: topAnchor, constant: Self.tile.minY - 3),
+      tagPill.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.tile.minX),
+      tagPill.bottomAnchor.constraint(equalTo: topAnchor, constant: Self.tile.maxY),
     ])
   }
   required init?(coder: NSCoder) { fatalError() }
 
   override var isActive: Bool {
     didSet { NSAccessibility.post(element: self, notification: .valueChanged) }
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+    guard isActive else { return }
+    NSColor.webtabsAccent.setFill()
+    NSBezierPath(
+      roundedRect: NSRect(x: Self.tile.midX - 7, y: Self.tile.maxY + 1, width: 14, height: 3),
+      xRadius: 1.5, yRadius: 1.5
+    ).fill()
   }
   override func menu(for event: NSEvent) -> NSMenu? { onMenu?() }
   override func otherMouseDown(with event: NSEvent) {
@@ -193,10 +241,18 @@ final class Pill: NSView {
   private let height: CGFloat
   private let padding: CGFloat
   private let radius: CGFloat
+  private let textColor: NSColor
+  /// An outline in the background's colour around the pill (0 = none).
+  private let ring: NSColor
+  private let ringWidth: CGFloat
 
-  init(color: NSColor, font: NSFont, height: CGFloat, padding: CGFloat, radius: CGFloat? = nil) {
+  init(
+    color: NSColor, font: NSFont, height: CGFloat, padding: CGFloat, radius: CGFloat? = nil,
+    textColor: NSColor = .white, ring: NSColor = .clear, ringWidth: CGFloat = 0
+  ) {
     (self.color, self.font, self.height, self.padding) = (color, font, height, padding)
     self.radius = radius ?? height / 2
+    (self.textColor, self.ring, self.ringWidth) = (textColor, ring, ringWidth)
     super.init(frame: .zero)
     isHidden = true
   }
@@ -204,16 +260,24 @@ final class Pill: NSView {
 
   override var intrinsicContentSize: NSSize {
     let width = (text as NSString).size(withAttributes: [.font: font]).width
-    return NSSize(width: max(height, ceil(width) + 2 * padding), height: height)
+    return NSSize(
+      width: max(height, ceil(width) + 2 * padding) + 2 * ringWidth, height: height + 2 * ringWidth)
   }
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
   override func draw(_ dirtyRect: NSRect) {
+    if ringWidth > 0 {
+      ring.setFill()
+      NSBezierPath(
+        roundedRect: bounds, xRadius: radius + ringWidth, yRadius: radius + ringWidth
+      ).fill()
+    }
+    let pill = bounds.insetBy(dx: ringWidth, dy: ringWidth)
     color.setFill()
-    NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
-    let s = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.white])
+    NSBezierPath(roundedRect: pill, xRadius: radius, yRadius: radius).fill()
+    let s = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: textColor])
     // Center the digits optically (cap height), not the whole line box.
-    let baseline = (bounds.height - font.capHeight) / 2
-    s.draw(at: NSPoint(x: (bounds.width - s.size().width) / 2, y: baseline + font.descender))
+    let baseline = pill.minY + (pill.height - font.capHeight) / 2
+    s.draw(at: NSPoint(x: pill.midX - s.size().width / 2, y: baseline + font.descender))
   }
 }
 

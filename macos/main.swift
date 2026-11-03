@@ -71,6 +71,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   /// Holds one web view per tab plus the empty state.
   let content = NSView()
   var emptyState: NSView!
+  /// Space before the first tab: the traffic lights, or nothing in full screen.
+  var stripLeading: NSLayoutConstraint!
   var config = Config()
   var configPath = ""
   var dataDir = ""
@@ -163,9 +165,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   private func buildWindow() {
     window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
-      defer: false)
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+      backing: .buffered, defer: false)
     window.title = "WebTabs"
+    // The tabs are the title bar: content runs under a transparent one, and an
+    // empty compact toolbar makes it 40 pt tall with the traffic lights centred.
+    window.titlebarAppearsTransparent = true
+    window.titleVisibility = .hidden
+    window.titlebarSeparatorStyle = .none
+    window.toolbar = NSToolbar(identifier: "WebTabsTitleBar")
+    window.toolbarStyle = .unifiedCompact
     window.minSize = NSSize(width: 540, height: 400)
     window.delegate = self
     window.isReleasedWhenClosed = false
@@ -173,20 +182,31 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     if !window.setFrameUsingName("WebTabsMain") { window.center() }
     window.setFrameAutosaveName("WebTabsMain")
 
-    // [tab][tab][tab][+] ............................ [gear]
-    let bar = NSView()
-    let add = SymbolTile("plus", label: "Add tab", tooltip: "Add tab (⌘T)")
+    // (●●●) [tab][tab][tab][+] ............................ [settings]
+    let bar = TitleBar()
+    let small = NSSize(width: 28, height: 28)
+    let add = SymbolTile("plus", label: "Add tab", tooltip: "Add tab (⌘T)", size: small, pointSize: 14)
     add.onClick = { [weak self] in self?.addTabDialog() }
-    let gear = SymbolTile("gearshape", label: "Settings", tooltip: "Settings (⌘,)")
+    let gear = SymbolTile(
+      "slider.horizontal.3", label: "Settings", tooltip: "Settings (⌘,)", size: small, pointSize: 14)
     gear.onClick = { [weak self] in self?.openSettings() }
+    for tile in [add, gear] {
+      tile.radius = 8
+      tile.imageView.contentTintColor = .secondaryLabelColor
+    }
     tabStack.orientation = .horizontal
-    tabStack.spacing = 2
+    tabStack.spacing = 8
+    // Room for the last tab's unread bubble, which sticks out past its tile.
+    tabStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
     tabStack.translatesAutoresizingMaskIntoConstraints = false
     tabStack.setAccessibilityElement(true)
     tabStack.setAccessibilityRole(.tabGroup)
     tabStack.setAccessibilityLabel("Tabs")
     strip.documentView = tabStack
     strip.drawsBackground = false
+    // It sits under the (transparent) title bar on purpose: no automatic inset.
+    strip.automaticallyAdjustsContentInsets = false
+    strip.contentInsets = NSEdgeInsets()
     strip.hasHorizontalScroller = false
     strip.verticalScrollElasticity = .none
     let line = NSBox()
@@ -206,11 +226,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     content.addSubview(emptyState)
     let stripWidth = strip.widthAnchor.constraint(equalTo: tabStack.widthAnchor)
     stripWidth.priority = .defaultHigh  // shrinks (and scrolls) when tabs overflow
+    stripLeading = strip.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 88)
     NSLayoutConstraint.activate([
       bar.topAnchor.constraint(equalTo: root.topAnchor),
       bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-      bar.heightAnchor.constraint(equalToConstant: 52),
+      bar.heightAnchor.constraint(equalToConstant: TitleBar.height),
       line.topAnchor.constraint(equalTo: bar.bottomAnchor),
       line.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       line.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -218,17 +239,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       content.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
       content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-      strip.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 6),
+      stripLeading,
       strip.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-      strip.heightAnchor.constraint(equalToConstant: 44),
+      strip.heightAnchor.constraint(equalToConstant: TitleBar.height),
       stripWidth,
       tabStack.leadingAnchor.constraint(equalTo: strip.contentView.leadingAnchor),
       tabStack.topAnchor.constraint(equalTo: strip.contentView.topAnchor),
       tabStack.bottomAnchor.constraint(equalTo: strip.contentView.bottomAnchor),
-      add.leadingAnchor.constraint(equalTo: strip.trailingAnchor, constant: 4),
+      add.leadingAnchor.constraint(equalTo: strip.trailingAnchor, constant: 2),
       add.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
       add.trailingAnchor.constraint(lessThanOrEqualTo: gear.leadingAnchor, constant: -8),
-      gear.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -6),
+      gear.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
       gear.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
       emptyState.centerXAnchor.constraint(equalTo: content.centerXAnchor),
       emptyState.centerYAnchor.constraint(equalTo: content.centerYAnchor),
@@ -251,6 +272,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   @objc func showWindow() {
     window.makeKeyAndOrderFront(nil)
     NSApp.activate()
+  }
+
+  /// No traffic lights in full screen, so the tabs move to the edge.
+  private func titleBarModeChanged() {
+    stripLeading.constant = window.styleMask.contains(.fullScreen) ? 10 : 88
+  }
+
+  func windowDidEnterFullScreen(_ notification: Notification) {
+    if notification.object as? NSWindow === window { titleBarModeChanged() }
+  }
+  func windowDidExitFullScreen(_ notification: Notification) {
+    if notification.object as? NSWindow === window { titleBarModeChanged() }
   }
 
   @objc func toggleVisible() {
