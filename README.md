@@ -69,6 +69,8 @@ The apps aren't notarized (macOS) or code-signed (Windows) yet.
   Choose *Always Allow* and it won't ask again. It asks once more if a
   differently signed copy of WebTabs (for example, your own build) has used the
   key since.
+
+  <img src="docs/keychain-prompt-macos.png" width="400" alt="macOS asking for the login keychain password so WebTabs can use the WebTabs WebCrypto Master Key, with Always Allow, Deny and Allow buttons">
 - **Windows** SmartScreen warns the first time: *More info › Run anyway*. The
   installer needs the Microsoft Edge WebView2 Runtime, which every Windows 11 PC
   already has; on Windows 10 it links you to it if missing.
