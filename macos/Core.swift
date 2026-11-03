@@ -102,17 +102,66 @@ struct Config: Codable {
   var closeToTray = true
   var unreadInTitle = true
   var unreadInDock = true
+  /// Linux/Windows only; kept so saving from here doesn't drop it.
+  var gpuAcceleration = true
+  var iconSize = 22
+  /// A preset name (`Appearance.tints`) or `#rrggbb`; nil is the system gray.
+  var tint: String?
   var userAgent: String?
   var tabs: [Tab] = []
 
   enum CodingKeys: String, CodingKey {
-    case notifications, tray
+    case notifications, tray, tint
     case closeToTray = "close_to_tray"
     case unreadInTitle = "unread_in_title"
     case unreadInDock = "unread_in_dock"
+    case gpuAcceleration = "gpu_acceleration"
+    case iconSize = "icon_size"
     case userAgent = "user_agent"
     case tabs = "tab"
   }
+
+  init() {}
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    let d = Config()
+    // Rust leaves defaults out.
+    notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? d.notifications
+    tray = try c.decodeIfPresent(Bool.self, forKey: .tray) ?? d.tray
+    closeToTray = try c.decodeIfPresent(Bool.self, forKey: .closeToTray) ?? d.closeToTray
+    unreadInTitle = try c.decodeIfPresent(Bool.self, forKey: .unreadInTitle) ?? d.unreadInTitle
+    unreadInDock = try c.decodeIfPresent(Bool.self, forKey: .unreadInDock) ?? d.unreadInDock
+    gpuAcceleration =
+      try c.decodeIfPresent(Bool.self, forKey: .gpuAcceleration) ?? d.gpuAcceleration
+    iconSize = try c.decodeIfPresent(Int.self, forKey: .iconSize) ?? d.iconSize
+    tint = try c.decodeIfPresent(String.self, forKey: .tint)
+    userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent)
+    tabs = try c.decodeIfPresent([Tab].self, forKey: .tabs) ?? []
+  }
+}
+
+/// Appearance limits and tint names from the core (`config::TINTS`, `ICON_SIZES`).
+struct Appearance: Decodable {
+  struct Sizes: Decodable {
+    let defaultSize: Int
+    let min: Int
+    let max: Int
+    enum CodingKeys: String, CodingKey {
+      case defaultSize = "default"
+      case min, max
+    }
+  }
+  let tints: [String]
+  let iconSize: Sizes
+  enum CodingKeys: String, CodingKey {
+    case tints
+    case iconSize = "icon_size"
+  }
+
+  static let shared: Appearance = Core.get(
+    "appearance",
+    or: Appearance(tints: [], iconSize: Sizes(defaultSize: 22, min: 16, max: 32)))
 }
 
 /// Unread state parsed from a page title (`badge::Badge`).

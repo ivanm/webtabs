@@ -35,6 +35,9 @@ const HEADER: &str = "\
 # unread_in_title = true    # total unread count in the window title
 # unread_in_dock  = true    # unread count on the Dock / launcher icon
 # gpu_acceleration = true   # Linux/Windows: draw pages on the GPU (restart to apply)
+# icon_size       = 22      # tab icon size in points, 16-32
+# tint            = \"sage\"  # title bar colour: graphite, sand, sage, sky, lavender,
+#                           # rose or \"#rrggbb\" (default: the system's)
 # user_agent      = \"...\"   # global user-agent override (default: Safari)
 #
 # [[tab]]
@@ -66,6 +69,15 @@ pub struct Config {
     /// the macOS bridge (which doesn't know it) never sees it.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub gpu_acceleration: bool,
+    /// Tab icon size in points, within `ICON_SIZES`. Written only when changed.
+    #[serde(
+        default = "default_icon_size",
+        skip_serializing_if = "is_default_icon_size"
+    )]
+    pub icon_size: u32,
+    /// Title bar colour: one of `TINTS` or `#rrggbb`; `None` is the system's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     #[serde(default, rename = "tab")]
@@ -94,6 +106,29 @@ fn default_true() -> bool {
     true
 }
 
+pub const ICON_SIZE_DEFAULT: u32 = 22;
+pub const ICON_SIZES: std::ops::RangeInclusive<u32> = 16..=32;
+/// Title bar colours every front end offers by name (soft tints that keep text
+/// and icons readable, each with a light and a dark variant of its own).
+pub const TINTS: &[&str] = &["graphite", "sand", "sage", "sky", "lavender", "rose"];
+
+fn default_icon_size() -> u32 {
+    ICON_SIZE_DEFAULT
+}
+
+fn is_default_icon_size(size: &u32) -> bool {
+    *size == ICON_SIZE_DEFAULT
+}
+
+/// A known tint name or `#rrggbb`, lowercased; anything else means the default.
+pub fn normalize_tint(tint: &str) -> Option<String> {
+    let tint = tint.trim().to_ascii_lowercase();
+    let hex = tint.len() == 7
+        && tint.starts_with('#')
+        && tint[1..].bytes().all(|b| b.is_ascii_hexdigit());
+    (hex || TINTS.contains(&tint.as_str())).then_some(tint)
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -108,6 +143,8 @@ impl Default for Config {
             unread_in_title: true,
             unread_in_dock: true,
             gpu_acceleration: true,
+            icon_size: ICON_SIZE_DEFAULT,
+            tint: None,
             user_agent: None,
             tabs: vec![
                 tab("WhatsApp", "https://web.whatsapp.com"),
@@ -170,6 +207,10 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Config, String> {
         let mut cfg: Config = toml::from_str(text).map_err(|e| e.to_string())?;
+        // Appearance is cosmetic: out-of-range or unknown values fall back
+        // instead of making the whole file invalid.
+        cfg.icon_size = cfg.icon_size.clamp(*ICON_SIZES.start(), *ICON_SIZES.end());
+        cfg.tint = cfg.tint.as_deref().and_then(normalize_tint);
         // Normalize hand-written entries the same way the edit dialog does.
         cfg.tabs = cfg
             .tabs
@@ -401,6 +442,25 @@ mod tests {
         assert_eq!(new_session_key("Gmail (work)", &[]), "gmail-work");
         assert_eq!(new_session_key("  ", &[]), "tab");
         assert_eq!(new_session_key("Ñandú", &[]), "and");
+    }
+
+    #[test]
+    fn appearance_is_normalized() {
+        let cfg = Config::parse("").unwrap();
+        assert_eq!((cfg.icon_size, cfg.tint.clone()), (22, None));
+        let text = cfg.to_toml();
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("icon_size") || l.starts_with("tint"))
+        );
+        let cfg = Config::parse("icon_size = 40\ntint = \" Sage \"\n").unwrap();
+        assert_eq!((cfg.icon_size, cfg.tint.as_deref()), (32, Some("sage")));
+        assert_eq!(Config::parse(&cfg.to_toml()).unwrap(), cfg);
+        assert_eq!(Config::parse("icon_size = 2").unwrap().icon_size, 16);
+        assert_eq!(normalize_tint("#ABCdef").as_deref(), Some("#abcdef"));
+        assert_eq!(normalize_tint("blue"), None);
+        assert_eq!(normalize_tint("#abc"), None);
     }
 
     #[test]

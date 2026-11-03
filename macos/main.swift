@@ -73,6 +73,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   var emptyState: NSView!
   /// Space before the first tab: the traffic lights, or nothing in full screen.
   var stripLeading: NSLayoutConstraint!
+  let bar = TitleBar()
+  private var saveTimer: Timer?
+  private var barHeight: NSLayoutConstraint!
+  private var stripHeight: NSLayoutConstraint!
+  /// The title bar's +, where the add-tab popover hangs from.
+  var addTile: Tile!
   var config = Config()
   var configPath = ""
   var dataDir = ""
@@ -183,10 +189,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     window.setFrameAutosaveName("WebTabsMain")
 
     // (●●●) [tab][tab][tab][+] ............................ [settings]
-    let bar = TitleBar()
     let small = NSSize(width: 28, height: 28)
     let add = SymbolTile("plus", label: "Add tab", tooltip: "Add tab (⌘T)", size: small, pointSize: 14)
     add.onClick = { [weak self] in self?.addTabDialog() }
+    addTile = add
     let gear = SymbolTile(
       "slider.horizontal.3", label: "Settings", tooltip: "Settings (⌘,)", size: small, pointSize: 14)
     gear.onClick = { [weak self] in self?.openSettings() }
@@ -227,11 +233,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     let stripWidth = strip.widthAnchor.constraint(equalTo: tabStack.widthAnchor)
     stripWidth.priority = .defaultHigh  // shrinks (and scrolls) when tabs overflow
     stripLeading = strip.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 88)
+    barHeight = bar.heightAnchor.constraint(equalToConstant: TabButton.metrics.height)
+    stripHeight = strip.heightAnchor.constraint(equalToConstant: TabButton.metrics.height)
     NSLayoutConstraint.activate([
       bar.topAnchor.constraint(equalTo: root.topAnchor),
       bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-      bar.heightAnchor.constraint(equalToConstant: TitleBar.height),
+      barHeight,
       line.topAnchor.constraint(equalTo: bar.bottomAnchor),
       line.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       line.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -241,7 +249,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
       stripLeading,
       strip.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-      strip.heightAnchor.constraint(equalToConstant: TitleBar.height),
+      stripHeight,
       stripWidth,
       tabStack.leadingAnchor.constraint(equalTo: strip.contentView.leadingAnchor),
       tabStack.topAnchor.constraint(equalTo: strip.contentView.topAnchor),
@@ -381,8 +389,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 
   // ---- options --------------------------------------------------------------------
 
-  /// Changes app-wide options from the settings window and persists them.
-  func updateOptions(_ change: (inout Config) -> Void) {
+  func applicationWillTerminate(_ notification: Notification) {
+    if saveTimer != nil { save() }
+  }
+
+  /// Changes app-wide options from the settings window and persists them
+  /// (shortly, for sliders and the colour panel, which change many times a second).
+  func updateOptions(saveNow: Bool = true, _ change: (inout Config) -> Void) {
     let before = config
     change(&config)
     if (config.notifications && !before.notifications)
@@ -391,7 +404,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       requestNotifications()
     }
     applyOptions()
-    save()
+    if saveNow { save() } else { saveSoon() }
+  }
+
+  func saveSoon() {
+    saveTimer?.invalidate()
+    saveTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+      self?.save()
+    }
   }
 
   func applyOptions() {
@@ -401,8 +421,29 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       NSStatusBar.system.removeStatusItem(status)
       self.status = nil
     }
+    applyAppearance()
     settingsWindow?.optionsChanged()
     refreshUnread()
+  }
+
+  /// Icon size and tint: big icons get the tall title bar, the tint colours the
+  /// bar (and the rings that cut the badges into the icons).
+  private func applyAppearance() {
+    let color = Tint.color(config.tint) ?? .windowBackgroundColor
+    bar.color = color
+    bar.appearance = Tint.appearance(config.tint)
+    TabButton.barColor = color
+    let m = BarMetrics(iconSize: config.iconSize)
+    if m != TabButton.metrics {
+      TabButton.metrics = m
+      barHeight.constant = m.height
+      stripHeight.constant = m.height
+      window.toolbarStyle = m.tall ? .unified : .unifiedCompact
+    }
+    for tv in tabs {
+      tv.button.setBarColor(color)
+      if tv.button.metrics != m { tv.button.apply(m) }
+    }
   }
 
   func showError(_ title: String, _ error: Error, in parent: NSWindow? = nil) {
@@ -577,7 +618,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     guard let i = tabs.firstIndex(where: { $0 === tv }), tabs.indices.contains(i + delta) else {
       return
     }
-    tabs.swapAt(i, i + delta)
+    moveTab(tv, to: i + delta)
+  }
+
+  /// Moves a tab to `index` in the order left after taking it out.
+  func moveTab(_ tv: TabView, to index: Int) {
+    guard let i = tabs.firstIndex(where: { $0 === tv }) else { return }
+    tabs.remove(at: i)
+    tabs.insert(tv, at: min(max(index, 0), tabs.count))
+    guard tabs.firstIndex(where: { $0 === tv }) != i else { return }
     syncBar()
     save()
     refreshSettings()
@@ -698,10 +747,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 
   @objc func addTab() { addTabDialog() }
 
+  /// A popover under the title bar's +; a sheet when asked from another window
+  /// (Settings).
   func addTabDialog(parent: NSWindow? = nil) {
-    if parent == nil { showWindow() }
-    TabDialog.present(on: parent ?? window, editing: nil, existing: tabs.map(\.tab)) {
-      [weak self] tab in
+    let add: (Tab) -> Void = { [weak self] tab in
       guard let self else { return }
       let tv = self.createTab(tab)
       self.tabs.append(tv)
@@ -709,6 +758,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
       self.updateEmptyState()
       self.save()
       self.refreshSettings()
+    }
+    if let parent {
+      TabDialog.present(on: parent, editing: nil, existing: tabs.map(\.tab), done: add)
+    } else {
+      showWindow()
+      TabDialog.popover(from: addTile, existing: tabs.map(\.tab), done: add)
     }
   }
 
@@ -980,6 +1035,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
   // ---- config file sync -------------------------------------------------------------
 
   func save() {
+    saveTimer?.invalidate()
+    saveTimer = nil
     var cfg = config
     cfg.tabs = tabs.map(\.tab)
     do {

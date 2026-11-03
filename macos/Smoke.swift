@@ -38,7 +38,7 @@ extension App {
         self.smokeFail("title badge")
       }
       self.window.contentView?.layoutSubtreeIfNeeded()
-      guard tv.button.frame.size == NSSize(width: 32, height: TitleBar.height),
+      guard tv.button.frame.size == NSSize(width: 32, height: 40),
         self.tabStack.arrangedSubviews.count == self.tabs.count, tv.button.isActive
       else { self.smokeFail("tab bar layout") }
       // Tabs live in the title bar: a click there must reach the tab, not the
@@ -48,12 +48,24 @@ extension App {
       guard frameView.hitTest(tabCenter) === tv.button else {
         self.smokeFail("clicks on a tab go to \(String(describing: frameView.hitTest(tabCenter)))")
       }
-      if let close = self.window.standardWindowButton(.closeButton) {
-        let mid = close.convert(NSPoint(x: close.bounds.midX, y: close.bounds.midY), to: nil).y
-        let barMid = self.window.frame.height - TitleBar.height / 2
-        guard abs(mid - barMid) < 1.5 else {
-          self.smokeFail("traffic lights at y \(mid), bar centre \(barMid)")
-        }
+      self.checkTrafficLights("compact bar")
+      // Big icons: the tall title bar, bigger tiles, lights still centred.
+      self.updateOptions { $0.iconSize = 30 }
+      self.window.contentView?.layoutSubtreeIfNeeded()
+      guard tv.button.frame.size == NSSize(width: 40, height: 52), self.bar.frame.height == 52
+      else { self.smokeFail("icon size 30: \(tv.button.frame.size)") }
+      self.checkTrafficLights("tall bar")
+      self.updateOptions { $0.iconSize = 22 }
+      self.updateOptions { $0.tint = "#203040" }
+      guard self.bar.appearance?.name == .darkAqua, self.config.tint == "#203040" else {
+        self.smokeFail("dark custom tint")
+      }
+      self.updateOptions { $0.tint = "sage" }
+      guard self.bar.appearance == nil else { self.smokeFail("preset tint follows the system") }
+      self.updateOptions { $0.tint = nil }
+      self.window.contentView?.layoutSubtreeIfNeeded()
+      guard tv.button.frame.size == NSSize(width: 32, height: 40) else {
+        self.smokeFail("icon size back to 22")
       }
       let titles = self.tabMenu(tv).items.map(\.title)
       guard titles.first == "Reload", titles.contains("Edit…"), titles.contains("Settings…") else {
@@ -86,38 +98,38 @@ extension App {
   private func addTabChecks(then next: @escaping () -> Void) {
     let before = tabs.count
     addTabDialog()
-    guard let d = TabDialog.open.last, window.attachedSheet === d.window else {
-      smokeFail("add sheet did not open")
+    guard let d = TabDialog.open.last, d.popover?.isShown == true else {
+      smokeFail("add popover did not open")
     }
-    snapshot(d.window.contentView!, "add-tab")
+    snapshot(d.content, "add-tab")
     // The smoke config has a shared Gmail tab: another google.com tab shares its login.
     d.url.stringValue = "calendar.google.com/other"
     d.updateHint()
-    guard !d.form.row(at: 5).isHidden else { smokeFail("isolation hint missing") }
-    d.isolated.state = .on
+    guard d.hintVisible else { smokeFail("shared-login hint missing") }
+    d.ownLogin.state = .on
     d.updateHint()
-    guard d.form.row(at: 5).isHidden else { smokeFail("isolation hint with Isolated on") }
-    d.isolated.state = .off
+    guard !d.hintVisible else { smokeFail("shared-login hint with Own login on") }
+    d.ownLogin.state = .off
     d.tag.stringValue = "Work"
     d.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: d.tag))
-    guard d.tag.stringValue == "Wo" else { smokeFail("icon tag longer than 2") }
-    guard d.advanced.isHidden else { smokeFail("Advanced should start folded") }
-    d.flipAdvanced()
-    d.ua.selectItem(withTitle: "Custom…")
-    d.syncCustom()
-    guard !d.advanced.isHidden, !d.advanced.row(at: 1).isHidden else {
-      smokeFail("Advanced / custom user agent")
+    guard d.tag.stringValue == "Wo", d.summaryText.contains("Tag Wo") else {
+      smokeFail("icon tag longer than 2, or not in the summary: \(d.summaryText)")
     }
+    guard !d.optionsVisible else { smokeFail("Options should start folded") }
+    d.flipOptions()
+    d.ua.selectedSegment = d.ua.segmentCount - 1
+    d.syncCustom()
+    guard d.optionsVisible, d.customAgentVisible else { smokeFail("Options / custom identity") }
     d.updateHint()
-    snapshot(d.window.contentView!, "add-tab-advanced")
+    snapshot(d.content, "add-tab-options")
     d.url.stringValue = "https://"
     d.name.stringValue = "Kept"
     d.submit()
-    guard window.attachedSheet === d.window, !d.form.row(at: 1).isHidden,
-      d.name.stringValue == "Kept"
-    else { smokeFail("invalid URL closed the sheet or lost input") }
-    snapshot(d.window.contentView!, "add-tab-error")
-    d.ua.selectItem(at: 0)
+    guard d.isShowing, d.errorVisible, d.name.stringValue == "Kept" else {
+      smokeFail("invalid URL closed the form or lost input")
+    }
+    snapshot(d.content, "add-tab-error")
+    d.ua.selectedSegment = 0
     d.syncCustom()
     d.url.stringValue = "example.org"
     d.name.stringValue = ""
@@ -139,7 +151,8 @@ extension App {
     guard let d = TabDialog.open.last, d.url.stringValue == "https://example.org",
       d.tag.stringValue == "Wo"
     else { smokeFail("edit sheet contents") }
-    d.isolated.state = .on
+    guard d.optionsVisible else { smokeFail("editing should open Options") }
+    d.ownLogin.state = .on
     d.submit()
     guard tabs[index] !== added, tabs[index].tab.session == "example-org", current === tabs[index]
     else { smokeFail("isolating a tab") }
@@ -149,12 +162,40 @@ extension App {
     }
   }
 
+  /// The traffic lights sit centred on the tab bar, whatever its height.
+  private func checkTrafficLights(_ what: String) {
+    guard let close = window.standardWindowButton(.closeButton) else { return }
+    let mid = close.convert(NSPoint(x: close.bounds.midX, y: close.bounds.midY), to: nil).y
+    let barMid = window.frame.height - TabButton.metrics.height / 2
+    guard abs(mid - barMid) < 1.5 else {
+      smokeFail("\(what): traffic lights at y \(mid), bar centre \(barMid)")
+    }
+  }
+
   /// Settings: one row per tab, instant options, close-to-tray needs the tray.
   private func settingsChecks(_ isolated: TabView, then next: @escaping () -> Void) {
     openSettings()
     guard let s = settingsWindow else { smokeFail("settings window") }
-    let rows = s.list.arrangedSubviews.filter { !($0 is NSBox) }
-    guard rows.count == tabs.count else { smokeFail("settings rows \(rows.count)/\(tabs.count)") }
+    guard s.table.numberOfRows == tabs.count else {
+      smokeFail("settings rows \(s.table.numberOfRows)/\(tabs.count)")
+    }
+    // Reordering (as a drop in the list does) and back.
+    let first = tabs[0]
+    moveTab(first, to: tabs.count - 1)
+    guard tabs.last === first, tabStack.arrangedSubviews.last === first.button else {
+      smokeFail("move tab to end")
+    }
+    moveTab(first, to: 0)
+    guard tabs.first === first else { smokeFail("move tab back") }
+    // Appearance controls follow the config, and the slider drives it.
+    s.select(.appearance)
+    s.slider.integerValue = 26
+    s.slider.sendAction(s.slider.action, to: s.slider.target)
+    guard config.iconSize == 26, TabButton.metrics.tall else { smokeFail("icon size slider") }
+    updateOptions { $0.iconSize = 22; $0.tint = "sky" }
+    guard s.slider.integerValue == 22, s.swatches.first(where: \.isActive)?.tint == "sky" else {
+      smokeFail("appearance pane out of sync")
+    }
     updateOptions { $0.tray = false }
     guard status == nil, !s.closeRow.isEnabled else { smokeFail("tray off") }
     updateOptions { $0.tray = true }
@@ -165,8 +206,12 @@ extension App {
     guard NSApp.dockTile.badgeLabel != nil else { smokeFail("Dock count missing") }
     // The badge-permission warning arrives asynchronously.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-      s.window.contentView?.layoutSubtreeIfNeeded()
-      self.snapshot(s.window.contentView!, "settings")
+      for pane in SettingsWindow.Pane.allCases {
+        s.select(pane)
+        s.window.contentView?.layoutSubtreeIfNeeded()
+        self.snapshot(s.window.contentView!, "settings-\(pane.title.lowercased())")
+      }
+      self.updateOptions { $0.tint = nil }
       s.window.close()
       self.removeChecks(isolated, then: next)
     }

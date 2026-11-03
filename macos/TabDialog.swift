@@ -1,13 +1,14 @@
 import AppKit
 
-/// Add/edit tab sheet: one-click presets on top (when adding), the form below,
-/// rarely needed knobs (user agent) folded into "Advanced". Mirrors
-/// src/linux/tab_dialog.rs.
-final class TabDialog: NSObject, NSTextFieldDelegate {
-  /// Keeps each dialog alive while its sheet is up.
+/// The add/edit tab form: one-click presets on top (when adding), address and
+/// name, and the rarely needed knobs folded into Options. Adding from the title
+/// bar's + shows it in a popover; editing, or adding from Settings, in a sheet.
+/// Same fields and rules as src/linux/tab_dialog.rs.
+final class TabDialog: NSObject, NSTextFieldDelegate, NSPopoverDelegate {
+  /// Keeps each form alive while it is shown.
   private(set) static var open: [TabDialog] = []
 
-  /// Calls `done` with the new/edited tab; nothing on cancel.
+  /// As a sheet on `parent`. Calls `done` with the new/edited tab; nothing on cancel.
   static func present(
     on parent: NSWindow, editing: Tab?, existing: [Tab], done: @escaping (Tab) -> Void
   ) {
@@ -16,126 +17,163 @@ final class TabDialog: NSObject, NSTextFieldDelegate {
       return
     }
     let dialog = TabDialog(editing: editing, existing: existing, done: done)
+    let window = NSWindow(
+      contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: true)
+    window.title = dialog.heading.stringValue
+    window.contentView = dialog.content
+    window.setContentSize(dialog.content.fittingSize)
+    window.initialFirstResponder = dialog.url
+    dialog.dismiss = { [weak window] in
+      if let window { window.sheetParent?.endSheet(window) }
+    }
     open.append(dialog)
-    parent.beginSheet(dialog.window) { _ in open.removeAll { $0 === dialog } }
+    parent.beginSheet(window) { _ in open.removeAll { $0 === dialog } }
   }
 
-  let window: NSWindow
-  private let editing: Tab?
-  private let existing: [Tab]
-  private let done: (Tab) -> Void
-  private let content = NSStackView()
-  let form = NSGridView()
+  /// As a popover under `anchor` (the title bar's +); a second click closes it.
+  static func popover(from anchor: NSView, existing: [Tab], done: @escaping (Tab) -> Void) {
+    if let shown = open.first(where: { $0.popover?.isShown == true }) {
+      shown.popover?.close()
+      return
+    }
+    let dialog = TabDialog(editing: nil, existing: existing, done: done)
+    let popover = NSPopover()
+    popover.behavior = .transient
+    popover.delegate = dialog
+    let controller = NSViewController()
+    controller.view = dialog.content
+    popover.contentViewController = controller
+    dialog.popover = popover
+    dialog.dismiss = { [weak popover] in popover?.close() }
+    open.append(dialog)
+    popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+    dialog.content.window?.makeFirstResponder(dialog.url)
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    Self.open.removeAll { $0 === self }
+  }
+
+  /// The form itself, hosted by the popover or the sheet.
+  let content = NSStackView()
+  let heading = NSTextField(labelWithString: "")
   let url = NSTextField()
   let name = NSTextField()
   let tag = NSTextField()
-  private let urlError = caption("Enter a web address, like https://example.com", error: true)
-  let isolated = NSButton(
-    checkboxWithTitle: "Isolated login (own cookies, for a second account)", target: nil,
-    action: nil)
+  let ownLogin = NSSwitch()
+  let notify = NSSwitch()
+  let ua = NSSegmentedControl()
+  private(set) var popover: NSPopover?
+  private var dismiss: () -> Void = {}
+  private let editing: Tab?
+  private let existing: [Tab]
+  private let done: (Tab) -> Void
+  private let urlError = caption("Enter a web address, like example.com", error: true)
   private let isoHint = caption("")
-  private let mute = NSButton(checkboxWithTitle: "Mute notifications", target: nil, action: nil)
-  private let disclosure = NSButton()
-  let advanced = NSGridView()
-  let ua = NSPopUpButton()
+  private let chevron = NSButton()
+  private let summary = NSTextField(labelWithString: "")
+  private let options = NSStackView()
   private let uaCustom = NSTextField()
+  /// Browser identities offered: nil is the default (Safari).
+  private let agents: [(name: String, value: String?)]
 
-  private static let customTag = -1
+  private static let width: CGFloat = 400
 
   private init(editing: Tab?, existing: [Tab], done: @escaping (Tab) -> Void) {
     (self.editing, self.existing, self.done) = (editing, existing, done)
-    window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 500, height: 300), styleMask: [.titled],
-      backing: .buffered, defer: true)
+    agents =
+      [("Safari", nil)]
+      + Core.userAgents.presets.filter { $0.count == 2 }.map { ($0[0], $0[1]) }
     super.init()
     let adding = editing == nil
-    window.title = adding ? "Add tab" : "Edit tab"
+    heading.stringValue = adding ? "Add a web app" : "Edit tab"
+    heading.font = .systemFont(ofSize: 15, weight: .semibold)
 
-    let heading = NSTextField(labelWithString: window.title)
-    heading.font = .boldSystemFont(ofSize: 13)
-
-    func field(_ f: NSTextField, _ value: String?, _ placeholder: String) {
+    func field(_ f: NSTextField, _ value: String?, _ placeholder: String, _ label: String) {
       f.stringValue = value ?? ""
       f.placeholderString = placeholder
       f.delegate = self
       f.lineBreakMode = .byTruncatingTail
       f.cell?.isScrollable = true
+      f.setAccessibilityLabel(label)
     }
-    field(url, editing?.url, "https://… or pick a service above")
-    field(name, editing?.name, "shown when you hover the icon")
-    field(tag, editing?.label, "e.g. W")
-    url.setAccessibilityLabel("URL")
-    name.setAccessibilityLabel("Name")
-    tag.setAccessibilityLabel("Icon tag")
-    tag.toolTip = "Optional 1-2 letters drawn on the icon, to tell similar tabs apart"
-    tag.widthAnchor.constraint(equalToConstant: 64).isActive = true
-    isolated.state = editing?.session != nil ? .on : .off
-    isolated.target = self
-    isolated.action = #selector(updateHint)
-    mute.state = editing?.notifications == false ? .on : .off
+    field(url, editing?.url, "app.example.com", "Web address")
+    field(name, editing?.name, "Shown when you hover the tab", "Name")
+    field(tag, editing?.label, "W", "Icon tag")
+    tag.alignment = .center
+    tag.widthAnchor.constraint(equalToConstant: 44).isActive = true
+    ownLogin.state = editing?.session != nil ? .on : .off
+    notify.state = editing?.notifications == false ? .off : .on
+    for control in [ownLogin, notify] {
+      control.target = self
+      control.action = #selector(optionChanged)
+    }
+    ownLogin.setAccessibilityLabel("Own login")
+    notify.setAccessibilityLabel("Notifications")
 
-    for row in [
-      [label("URL"), url], [NSGridCell.emptyContentView, urlError], [label("Name"), name],
-      [label("Icon tag"), tag], [NSGridCell.emptyContentView, isolated],
-      [NSGridCell.emptyContentView, isoHint], [NSGridCell.emptyContentView, mute],
-    ] {
-      form.addRow(with: row)
-    }
-    style(form)
-    form.cell(for: tag)?.xPlacement = .leading
-    form.row(at: 1).isHidden = true
-
-    // Advanced: user agent.
-    ua.addItem(withTitle: "Default (Safari)")
-    for preset in Core.userAgents.presets where preset.count == 2 {
-      ua.addItem(withTitle: preset[0])
-      ua.lastItem?.representedObject = preset[1]
-    }
-    ua.addItem(withTitle: "Custom…")
-    ua.lastItem?.tag = Self.customTag
+    ua.segmentCount = agents.count + 1
+    for (i, agent) in agents.enumerated() { ua.setLabel(agent.name, forSegment: i) }
+    ua.setLabel("Custom…", forSegment: agents.count)
+    ua.trackingMode = .selectOne
     ua.target = self
     ua.action = #selector(syncCustom)
-    ua.setAccessibilityLabel("User agent")
+    ua.setAccessibilityLabel("Browser identity")
     uaCustom.placeholderString = Core.userAgents.defaultAgent
     uaCustom.lineBreakMode = .byTruncatingTail
     uaCustom.cell?.isScrollable = true
-    uaCustom.setAccessibilityLabel("Custom user agent")
+    uaCustom.delegate = self
+    uaCustom.setAccessibilityLabel("Custom browser identity")
     let current = editing?.userAgent
-    if let current {
-      if let i = ua.itemArray.firstIndex(where: { $0.representedObject as? String == current }) {
-        ua.selectItem(at: i)
-      } else {
-        ua.selectItem(withTag: Self.customTag)
-        uaCustom.stringValue = current
-      }
+    if let index = agents.firstIndex(where: { $0.value == current }) {
+      ua.selectedSegment = index
+    } else {
+      ua.selectedSegment = agents.count
+      uaCustom.stringValue = current ?? ""
     }
-    let uaHint = caption(
-      "Change only if a site says your browser isn’t supported. The tab reloads.")
-    advanced.addRow(with: [label("User agent"), ua])
-    advanced.addRow(with: [NSGridCell.emptyContentView, uaCustom])
-    advanced.addRow(with: [NSGridCell.emptyContentView, uaHint])
-    style(advanced)
-    advanced.cell(for: ua)?.xPlacement = .leading
-    // Keep both grids' columns aligned.
-    form.column(at: 0).width = 70
-    advanced.column(at: 0).width = 70
 
-    disclosure.bezelStyle = .disclosure
-    disclosure.setButtonType(.pushOnPushOff)
-    disclosure.title = ""
-    disclosure.target = self
-    disclosure.action = #selector(toggleAdvanced)
-    disclosure.setAccessibilityLabel("Advanced")
-    let advancedLabel = NSButton(title: "Advanced", target: self, action: #selector(flipAdvanced))
-    advancedLabel.isBordered = false
-    advancedLabel.setAccessibilityElement(false)
-    let advancedRow = NSStackView(views: [disclosure, advancedLabel])
-    advancedRow.spacing = 2
-    disclosure.state = current != nil ? .on : .off
+    // Options: folded to one summary line unless something is set.
+    chevron.bezelStyle = .disclosure
+    chevron.setButtonType(.pushOnPushOff)
+    chevron.title = ""
+    chevron.target = self
+    chevron.action = #selector(toggleOptions)
+    chevron.setAccessibilityLabel("Options")
+    let optionsTitle = NSButton(title: "Options", target: self, action: #selector(flipOptions))
+    optionsTitle.isBordered = false
+    optionsTitle.font = .systemFont(ofSize: 13, weight: .medium)
+    optionsTitle.setAccessibilityElement(false)
+    summary.textColor = .secondaryLabelColor
+    summary.lineBreakMode = .byTruncatingTail
+    summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    let optionsRow = NSStackView(views: [chevron, optionsTitle, summary])
+    optionsRow.spacing = 4
+    optionsRow.setCustomSpacing(8, after: optionsTitle)
+
+    options.orientation = .vertical
+    options.alignment = .leading
+    options.spacing = 12
+    options.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 0)
+    let uaBlock = NSStackView(views: [ua, uaCustom, caption("Change it only if a site says your browser isn’t supported.", width: 320)])
+    uaBlock.orientation = .vertical
+    uaBlock.alignment = .leading
+    uaBlock.spacing = 6
+    uaCustom.widthAnchor.constraint(equalTo: uaBlock.widthAnchor).isActive = true
+    for view in [
+      optionLine("Own login", "Separate cookies and storage, for a second account", ownLogin),
+      optionLine("Notifications", "Unread badges show either way", notify),
+      optionLine("Icon tag", "One or two letters on the icon, to tell similar tabs apart", tag),
+      labelled("Browser identity", uaBlock, small: false),
+    ] {
+      options.addArrangedSubview(view)
+      view.widthAnchor.constraint(equalTo: options.widthAnchor, constant: -18).isActive = true
+    }
+    chevron.state =
+      !adding || editing?.session != nil || editing?.notifications == false
+        || editing?.label != nil || current != nil ? .on : .off
 
     let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
     cancel.keyEquivalent = "\u{1b}"
-    let ok = NSButton(title: adding ? "Add tab" : "Save", target: self, action: #selector(submit))
+    let ok = NSButton(title: adding ? "Add Tab" : "Save", target: self, action: #selector(submit))
     ok.keyEquivalent = "\r"
     let buttons = NSStackView(views: [NSView(), cancel, ok])
 
@@ -145,39 +183,72 @@ final class TabDialog: NSObject, NSTextFieldDelegate {
     content.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
     content.addArrangedSubview(heading)
     if adding { content.addArrangedSubview(presetsRow()) }
-    for view in [form, advancedRow, advanced, buttons] { content.addArrangedSubview(view) }
-    content.setCustomSpacing(6, after: advancedRow)
-    content.setCustomSpacing(20, after: advanced)
+    for view in [
+      labelled(adding ? "Or any web address" : "Web address", url),
+      urlError,
+      labelled("Name", name),
+      isoHint, optionsRow, options, buttons,
+    ] {
+      content.addArrangedSubview(view)
+    }
+    content.setCustomSpacing(6, after: urlError)
+    content.setCustomSpacing(8, after: optionsRow)
+    content.setCustomSpacing(18, after: options)
     content.translatesAutoresizingMaskIntoConstraints = false
-    for view in content.arrangedSubviews where view !== heading && view !== advancedRow {
+    for view in content.arrangedSubviews where view !== heading && view !== optionsRow {
       view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -36).isActive = true
     }
-    window.contentView = content
-    content.widthAnchor.constraint(equalToConstant: 500).isActive = true
+    content.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+    urlError.isHidden = true
 
     updateHint()
     syncCustom()
-    toggleAdvanced()
-    window.setContentSize(content.fittingSize)
-    window.initialFirstResponder = url
+    toggleOptions()
+    updateSummary()
   }
 
-  private func style(_ grid: NSGridView) {
-    grid.rowSpacing = 8
-    grid.columnSpacing = 12
-    grid.rowAlignment = .firstBaseline
-    grid.column(at: 0).xPlacement = .trailing
-    grid.column(at: 1).xPlacement = .fill
+  /// Title and detail on the left, the control on the right.
+  private func optionLine(_ title: String, _ detail: String, _ control: NSView) -> NSView {
+    let titleLabel = NSTextField(labelWithString: title)
+    titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+    let text = NSStackView(views: [titleLabel, caption(detail, width: 260)])
+    text.orientation = .vertical
+    text.alignment = .leading
+    text.spacing = 2
+    text.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+    let row = NSStackView(views: [text, control])
+    row.distribution = .fill
+    row.alignment = .centerY
+    row.spacing = 12
+    return row
   }
 
-  /// The row of service buttons; clicking one fills in URL and name.
+  /// A small label above its control.
+  private func labelled(_ title: String, _ control: NSView, small: Bool = true) -> NSView {
+    let label = NSTextField(labelWithString: title)
+    if small {
+      label.font = .systemFont(ofSize: 12)
+      label.textColor = .secondaryLabelColor
+    } else {
+      label.font = .systemFont(ofSize: 13, weight: .medium)
+    }
+    let stack = NSStackView(views: [label, control])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 6
+    control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = small
+    return stack
+  }
+
+  /// The service chips; clicking one fills in address and name.
   private func presetsRow() -> NSView {
     let row = NSStackView()
     row.distribution = .fillEqually
     row.spacing = 8
     for preset in Core.presets {
-      let tile = Tile(size: NSSize(width: 100, height: 82))
-      tile.radius = 12
+      let tile = Tile(size: NSSize(width: 80, height: 72))
+      tile.radius = 10
+      tile.restingAlpha = 0.045
       tile.removeConstraints(tile.constraints.filter { $0.firstAttribute == .width })
       let icon = NSImageView()
       icon.imageScaling = .scaleProportionallyUpOrDown
@@ -192,14 +263,15 @@ final class TabDialog: NSObject, NSTextFieldDelegate {
         }
       }
       let text = NSTextField(labelWithString: preset.name)
+      text.font = .systemFont(ofSize: 12)
       let column = NSStackView(views: [icon, text])
       column.orientation = .vertical
       column.spacing = 6
       column.translatesAutoresizingMaskIntoConstraints = false
       tile.addSubview(column)
       NSLayoutConstraint.activate([
-        icon.widthAnchor.constraint(equalToConstant: 40),
-        icon.heightAnchor.constraint(equalToConstant: 40),
+        icon.widthAnchor.constraint(equalToConstant: 32),
+        icon.heightAnchor.constraint(equalToConstant: 32),
         column.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
         column.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
       ])
@@ -209,9 +281,9 @@ final class TabDialog: NSObject, NSTextFieldDelegate {
         guard let self else { return }
         self.url.stringValue = preset.url
         self.name.stringValue = preset.name
-        self.form.row(at: 1).isHidden = true
+        self.urlError.isHidden = true
         self.updateHint()
-        self.window.makeFirstResponder(self.name)
+        self.content.window?.makeFirstResponder(self.name)
       }
       row.addArrangedSubview(tile)
     }
@@ -220,91 +292,112 @@ final class TabDialog: NSObject, NSTextFieldDelegate {
 
   // ---- behaviour ------------------------------------------------------------
 
+  /// Shown, as a popover or sheet.
+  var isShowing: Bool { popover?.isShown ?? (content.window?.sheetParent != nil) }
+  var errorVisible: Bool { !urlError.isHidden }
+  var hintVisible: Bool { !isoHint.isHidden }
+  var optionsVisible: Bool { !options.isHidden }
+  var customAgentVisible: Bool { !uaCustom.isHidden }
+  var summaryText: String { summary.stringValue }
+
   func controlTextDidChange(_ note: Notification) {
     if note.object as? NSTextField === tag, tag.stringValue.count > 2 {
       tag.stringValue = String(tag.stringValue.prefix(2))
     }
     if note.object as? NSTextField === url {
-      form.row(at: 1).isHidden = true
+      urlError.isHidden = true
       updateHint()
     }
+    updateSummary()
   }
 
   /// Warns when a second tab on the same site would share the first one's login.
-  @objc func updateHint() {
+  func updateHint() {
     let site = Core.site(url.stringValue)
     let twin = existing.first { t in
       t.url != editing?.url && t.session == nil && site != nil && Core.site(t.url) == site
     }
-    if let twin, isolated.state != .on {
+    if let twin, ownLogin.state != .on {
       isoHint.stringValue =
-        "Shares its login with your “\(twin.name)” tab. Select Isolated login to use a different account."
-      form.row(at: 5).isHidden = false
+        "This would share its login with your “\(twin.name)” tab. Turn on Own login in Options to use a different account."
+      isoHint.isHidden = false
     } else {
-      form.row(at: 5).isHidden = true
+      isoHint.isHidden = true
     }
   }
 
+  /// One line saying what Options holds, so it can stay folded.
+  private func updateSummary() {
+    var parts = [ownLogin.state == .on ? "Own login" : "Shared login"]
+    parts.append(notify.state == .on ? "Notifications on" : "Muted")
+    let label = tag.stringValue.trimmingCharacters(in: .whitespaces)
+    if !label.isEmpty { parts.append("Tag \(label)") }
+    if ua.selectedSegment > 0 { parts.append(ua.label(forSegment: ua.selectedSegment) ?? "") }
+    summary.stringValue = parts.joined(separator: " · ")
+  }
+
+  @objc func optionChanged() {
+    updateHint()
+    updateSummary()
+  }
+
   @objc func syncCustom() {
-    advanced.row(at: 1).isHidden = ua.selectedTag() != Self.customTag
-    if ua.selectedTag() == Self.customTag { window.makeFirstResponder(uaCustom) }
+    let custom = ua.selectedSegment == agents.count
+    uaCustom.isHidden = !custom
+    if custom { content.window?.makeFirstResponder(uaCustom) }
+    updateSummary()
   }
 
-  @objc func flipAdvanced() {
-    disclosure.state = disclosure.state == .on ? .off : .on
-    toggleAdvanced()
+  @objc func flipOptions() {
+    chevron.state = chevron.state == .on ? .off : .on
+    toggleOptions()
   }
 
-  @objc private func toggleAdvanced() {
-    advanced.isHidden = disclosure.state != .on
+  @objc private func toggleOptions() {
+    options.isHidden = chevron.state != .on
+    summary.isHidden = chevron.state == .on
   }
 
-  @objc func cancel() {
-    window.sheetParent?.endSheet(window)
-  }
+  @objc func cancel() { dismiss() }
 
   @objc func submit() {
-    let userAgent: Any =
-      ua.selectedTag() == Self.customTag
+    let agent: Any =
+      ua.selectedSegment == agents.count
       ? uaCustom.stringValue
-      : (ua.selectedItem?.representedObject as? String).map { $0 as Any } ?? NSNull()
+      : (agents[max(0, ua.selectedSegment)].value.map { $0 as Any } ?? NSNull())
     guard
       let made: MadeTab = try? Core.call(
         "make_tab",
         [
           "name": name.stringValue, "url": url.stringValue, "label": tag.stringValue,
-          "user_agent": userAgent,
+          "user_agent": agent,
         ])
     else { return }
     guard made.valid else {
-      // Keep everything typed so far; point at the URL.
-      form.row(at: 1).isHidden = false
-      window.makeFirstResponder(url)
+      // Keep everything typed so far; point at the address.
+      urlError.isHidden = false
+      content.window?.makeFirstResponder(url)
       url.currentEditor()?.selectAll(nil)
       return
     }
     var tab = made.tab
-    tab.notifications = mute.state != .on
-    if isolated.state == .on {
+    tab.notifications = notify.state == .on
+    if ownLogin.state == .on {
       // Keep the existing storage when editing an already isolated tab.
       tab.session =
         editing?.session
         ?? Core.get(
           "session_key", ["name": tab.name, "taken": existing.compactMap(\.session)], or: "tab")
     }
-    window.sheetParent?.endSheet(window)
+    dismiss()
     done(tab)
   }
 }
 
-private func label(_ text: String) -> NSTextField {
-  NSTextField(labelWithString: text)
-}
-
-func caption(_ text: String, error: Bool = false) -> NSTextField {
+func caption(_ text: String, error: Bool = false, width: CGFloat = 360) -> NSTextField {
   let c = NSTextField(wrappingLabelWithString: text)
   c.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
   c.textColor = error ? .systemRed : .secondaryLabelColor
-  c.preferredMaxLayoutWidth = 370
+  c.preferredMaxLayoutWidth = width
   return c
 }

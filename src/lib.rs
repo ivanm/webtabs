@@ -32,6 +32,14 @@ fn dispatch(request: Value) -> Result<Value, String> {
                 .with_label(text("label"));
             Ok(json!({"valid": tab.is_valid(), "tab": tab}))
         }
+        "appearance" => Ok(json!({
+            "tints": config::TINTS,
+            "icon_size": {
+                "default": config::ICON_SIZE_DEFAULT,
+                "min": config::ICON_SIZES.start(),
+                "max": config::ICON_SIZES.end(),
+            },
+        })),
         "user_agents" => Ok(json!({
             "default": config::DEFAULT_USER_AGENT,
             "presets": config::USER_AGENT_PRESETS,
