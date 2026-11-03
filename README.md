@@ -63,6 +63,12 @@ The apps aren't notarized (macOS) or code-signed (Windows) yet.
 - **macOS** blocks the first launch of a downloaded copy. Open it anyway from
   System Settings › Privacy & Security › *Open Anyway*. Downloading with `gh`
   (above) skips this check.
+- **macOS** may then ask for your login password so WebTabs can use the
+  *WebTabs WebCrypto Master Key*. This is WebKit's key for the encrypted data
+  sites store (web crypto keys, some logins). It stays in your login keychain.
+  Choose *Always Allow* and it won't ask again. It asks once more if a
+  differently signed copy of WebTabs (for example, your own build) has used the
+  key since.
 - **Windows** SmartScreen warns the first time: *More info › Run anyway*. The
   installer needs the Microsoft Edge WebView2 Runtime, which every Windows 11 PC
   already has; on Windows 10 it links you to it if missing.
