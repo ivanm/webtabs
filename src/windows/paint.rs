@@ -170,7 +170,8 @@ impl Font {
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
+                // Grayscale, like Windows' own caption glyphs (ClearType fringes on tints).
+                ANTIALIASED_QUALITY,
                 0,
                 &HSTRING::from(face),
             )

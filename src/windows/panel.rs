@@ -601,6 +601,7 @@ impl Panel {
             }
             "open_site" => web::open_external("https://github.com/ivanm/webtabs"),
             "open_vaan" => web::open_external("https://vaan.dev"),
+            "open_license" => web::open_external("https://www.gnu.org/licenses/gpl-3.0.html"),
             "open_toml" => app.edit_config(),
             "close" => self.close(),
             other => eprintln!("webtabs: settings window: unknown message {other:?}"),

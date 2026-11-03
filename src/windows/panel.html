@@ -243,6 +243,7 @@
     <img id="appIcon" alt="">
     <div class="name">WebTabs</div>
     <div class="hint"><span id="version"></span> by <button class="link" id="vaan">vaan.dev</button></div>
+    <div class="hint">Licensed under the <button class="link" id="gpl">GPL 3.0 or later</button></div>
     <div>Your web apps in one window, signed in and quiet.</div>
     <div class="buttons">
       <button class="btn" id="aboutToml">Open tabs.toml</button>
@@ -705,6 +706,7 @@ $("add").onclick = () => openForm(null, false);
 $("toml").onclick = $("aboutToml").onclick = () => post({ cmd: "open_toml" });
 $("site").onclick = () => post({ cmd: "open_site" });
 $("vaan").onclick = () => post({ cmd: "open_vaan" });
+$("gpl").onclick = () => post({ cmd: "open_license" });
 $("size").addEventListener("pointerdown", () => { dragging = true; });
 $("size").addEventListener("pointerup", () => { dragging = false; });
 $("size").addEventListener("input", () => setAppearance({ icon_size: Number($("size").value) }));
