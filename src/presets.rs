@@ -23,6 +23,10 @@ pub const PRESETS: &[Preset] = &[
         name: "Gmail",
         url: "https://mail.google.com/mail/u/0/",
     },
+    Preset {
+        name: "Discord",
+        url: "https://discord.com/app",
+    },
 ];
 
 #[cfg(test)]
