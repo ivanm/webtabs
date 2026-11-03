@@ -17,7 +17,7 @@ pub fn is_enabled(entry: &Path) -> bool {
 
 pub fn desktop_entry(exe: &Path) -> String {
     format!(
-        "[Desktop Entry]\nType=Application\nName=webtabs\nComment=Your web apps in one tiny window\n\
+        "[Desktop Entry]\nType=Application\nName=WebTabs\nComment=Your web apps in one tiny window\n\
          Exec=\"{}\" --hidden\nIcon=webtabs\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
         exe.display()
     )

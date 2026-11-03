@@ -251,7 +251,7 @@ fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window, by_user: bo
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_transient_for(Some(&parent));
     window.set_default_size(1000, 760);
-    window.set_title("webtabs");
+    window.set_title("WebTabs");
     window.add(popup);
 
     let url_fn = tab_url.clone();
@@ -321,7 +321,7 @@ fn setup_popup(popup: &WebView, tab_url: UrlFn, parent: gtk::Window, by_user: bo
             p.title()
                 .as_deref()
                 .filter(|t| !t.is_empty())
-                .unwrap_or("webtabs"),
+                .unwrap_or("WebTabs"),
         );
     });
     setup_routing(popup, tab_url, window.upcast());

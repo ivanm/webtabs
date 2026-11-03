@@ -4,6 +4,7 @@
 mod icons;
 mod settings;
 mod tab_dialog;
+mod tabbar;
 mod web;
 
 use crate::badge::Badge;
@@ -32,21 +33,13 @@ const TRAY_ICON: &str = include_str!("../../assets/webtabs-tray.svg");
 const TRAY_ICON_UNREAD: &str = include_str!("../../assets/webtabs-tray-unread.svg");
 /// Desktop file the launcher badge is keyed by (see packaging/webtabs.desktop).
 const LAUNCHER_APP_URI: &str = "application://webtabs.desktop";
-const TAB_ICON_PX: i32 = 32;
 const CSS: &str = "
-.tabbar { padding: 2px 6px; border-bottom: 1px solid alpha(currentColor, 0.12); }
-.tabbar button { min-height: 0; min-width: 0; }
-.tabbar button.tab { padding: 4px 6px; margin: 2px 1px; border-radius: 10px;
-                     border: none; background: none; box-shadow: none; }
-.tabbar button.tab:hover { background: alpha(currentColor, 0.08); }
-.tabbar button.tab.active { background: alpha(currentColor, 0.16); }
-.tag { background: #3b82f6; color: #fff; border-radius: 5px; padding: 0 3px;
-       font-size: 9px; font-weight: bold; min-height: 13px; }
-.preset { padding: 10px 4px; border-radius: 12px; }
-.badge { background: #e5484d; color: #fff; border-radius: 10px; padding: 0 4px;
-         font-size: 10px; font-weight: bold; min-width: 10px; min-height: 16px; }
-.tabbar button.bar { padding: 2px 10px; border-radius: 10px; }
-.bar-glyph { font-size: 28px; opacity: 0.85; }
+.tabbar { padding: 0 8px 0 10px; border-bottom: 1px solid alpha(currentColor, 0.10); }
+.preset { padding: 10px 4px 8px; border-radius: 10px; background: alpha(currentColor, 0.05); }
+.preset:hover { background: alpha(currentColor, 0.09); }
+.form-title { font-size: 15px; font-weight: 600; }
+.options-title { font-weight: 600; }
+label.error { color: #d93036; }
 .caption { font-size: 0.85em; }
 .empty-title { font-size: 1.4em; font-weight: bold; }
 ";
@@ -75,7 +68,7 @@ pub fn run() -> std::process::ExitCode {
         unsafe { std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1") };
     }
     glib::set_prgname(Some("webtabs"));
-    glib::set_application_name("webtabs");
+    glib::set_application_name("WebTabs");
     let gapp = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
     let state: Rc<RefCell<Option<Rc<App>>>> = Rc::default();
     gapp.connect_activate(move |gapp| {
@@ -111,8 +104,12 @@ struct App {
     stack: gtk::Stack,
     /// The whole bar (tabs, "+", gear); hidden while a page is fullscreen.
     bar: gtk::Box,
-    /// Tab buttons, in tab order; the "+" button sits right after it.
+    /// Tab tiles, in tab order; the "+" tile sits right after it.
     tab_bar: gtk::Box,
+    /// The bar's colours and geometry, shared by every tile.
+    look: Rc<Cell<tabbar::Look>>,
+    add_tile: Rc<tabbar::Tile>,
+    gear_tile: Rc<tabbar::Tile>,
     /// Tab whose page is fullscreen (0 = none).
     fullscreen: Cell<u64>,
     current: Cell<u64>,
@@ -133,8 +130,9 @@ struct App {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while the settings window is open, so App changes show up in it.
     settings_refresh: RefCell<Option<Rc<dyn Fn()>>>,
-    settings_close_row: RefCell<Option<glib::WeakRef<gtk::ListBoxRow>>>,
-    settings_window: RefCell<Option<glib::WeakRef<gtk::Dialog>>>,
+    settings_ui: RefCell<Option<Rc<settings::Ui>>>,
+    /// A pending delayed save (icon-size slider, colour picker).
+    save_later: RefCell<Option<glib::SourceId>>,
     /// Isolated-session data scheduled for deletion; cancelled if the key returns.
     pending_deletes: RefCell<HashMap<String, glib::SourceId>>,
 }
@@ -145,10 +143,7 @@ struct TabView {
     id: u64,
     tab: RefCell<Tab>,
     webview: WebView,
-    button: gtk::Button,
-    badge_label: gtk::Label,
-    tag_label: gtk::Label,
-    icon: gtk::Image,
+    tile: Rc<tabbar::Tile>,
     pixbuf: RefCell<Option<Pixbuf>>,
     icon_fetched: Cell<bool>,
     /// Bumped when the tab's URL changes, so a slow fetch for the old URL is ignored.
@@ -167,13 +162,13 @@ impl TabView {
 
     fn set_icon(&self, p: &Pixbuf) {
         *self.pixbuf.borrow_mut() = Some(p.clone());
-        icons::show(&self.icon, p, TAB_ICON_PX);
+        self.tile.set_icon(Some(p));
     }
 
     fn update_tag(&self) {
-        let label = self.tab.borrow().label.clone();
-        self.tag_label.set_text(label.as_deref().unwrap_or(""));
-        self.tag_label.set_visible(label.is_some());
+        let tab = self.tab.borrow();
+        self.tile.set_tag(tab.label.as_deref());
+        self.tile.set_name(&tab.name);
     }
 
     fn update_tooltip(&self) {
@@ -183,7 +178,8 @@ impl TabView {
             Badge::Dot => " \u{2014} new activity".into(),
             Badge::None => String::new(),
         };
-        self.button
+        self.tile
+            .area
             .set_tooltip_text(Some(&format!("{}{unread}", tab.name)));
     }
 }
@@ -195,7 +191,7 @@ impl App {
         install_css();
 
         let window = gtk::ApplicationWindow::new(gapp);
-        window.set_title("webtabs");
+        window.set_title("WebTabs");
         window.set_default_size(1280, 860);
         let icon_dir = write_icons();
         match app_icons() {
@@ -207,34 +203,27 @@ impl App {
             Err(e) => eprintln!("webtabs: app icon: {e}"),
         }
 
-        // [tab][tab][tab][+] ............................ [gear]
+        // [tab][tab][tab][+] ............................ [settings]
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         bar.style_context().add_class("tabbar");
         let tab_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        // Text glyphs instead of symbolic icons: some icon themes (Papirus) draw
-        // those tiny, while text always follows the theme's colour and our size.
-        let bar_button = |glyph: &str, tip: &str| {
-            let label = gtk::Label::new(Some(glyph));
-            label.style_context().add_class("bar-glyph");
-            let b = gtk::Button::new();
-            b.add(&label);
-            b.set_relief(gtk::ReliefStyle::None);
-            b.set_valign(gtk::Align::Center);
-            b.set_tooltip_text(Some(tip));
-            b.style_context().add_class("bar");
-            hand_cursor(&b);
-            b
-        };
-        let add = bar_button("+", "Add tab (Ctrl+T)");
-        let gear = bar_button("\u{2699}", "Settings (Ctrl+,)");
+        let look = Rc::new(Cell::new(tabbar::Look::resolve(
+            &window,
+            cfg.icon_size,
+            cfg.tint.as_deref(),
+        )));
+        let add = tabbar::Tile::new(tabbar::Kind::Add, &look);
+        add.area.set_tooltip_text(Some("Add tab (Ctrl+T)"));
+        let gear = tabbar::Tile::new(tabbar::Kind::Settings, &look);
+        gear.area.set_tooltip_text(Some("Settings (Ctrl+,)"));
         let tabs_scroll =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         tabs_scroll.set_policy(gtk::PolicyType::External, gtk::PolicyType::Never);
         tabs_scroll.set_propagate_natural_width(true);
         tabs_scroll.add(&tab_bar);
         bar.pack_start(&tabs_scroll, false, true, 0);
-        bar.pack_start(&add, false, false, 4);
-        bar.pack_end(&gear, false, false, 0);
+        bar.pack_start(&add.area, false, false, 0);
+        bar.pack_end(&gear.area, false, false, 0);
 
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
@@ -251,6 +240,9 @@ impl App {
             stack,
             bar,
             tab_bar,
+            look,
+            add_tile: add.clone(),
+            gear_tile: gear.clone(),
             fullscreen: Cell::new(0),
             current: Cell::new(0),
             context: web::new_context(None),
@@ -266,17 +258,28 @@ impl App {
             last_launcher: Cell::default(),
             monitor: RefCell::default(),
             settings_refresh: RefCell::default(),
-            settings_close_row: RefCell::default(),
-            settings_window: RefCell::default(),
+            settings_ui: RefCell::default(),
+            save_later: RefCell::default(),
             pending_deletes: RefCell::default(),
         });
 
         let weak = Rc::downgrade(&app);
-        add.connect_clicked(move |_| with(&weak, |a| a.add_tab_dialog()));
+        add.connect_click(move || with(&weak, |a| a.add_tab_dialog()));
         let weak = Rc::downgrade(&app);
         empty_add.connect_clicked(move |_| with(&weak, |a| a.add_tab_dialog()));
         let weak = Rc::downgrade(&app);
-        gear.connect_clicked(move |_| with(&weak, settings::open));
+        gear.connect_click(move || with(&weak, settings::open));
+        // A theme switch (light/dark) recolours the bar.
+        if let Some(settings) = gtk::Settings::default() {
+            for prop in ["gtk-theme-name", "gtk-application-prefer-dark-theme"] {
+                let weak = Rc::downgrade(&app);
+                settings.connect_notify_local(Some(prop), move |_, _| {
+                    let weak = weak.clone();
+                    // After the new theme's styles are in.
+                    glib::idle_add_local_once(move || with(&weak, |a| a.apply_appearance()));
+                });
+            }
+        }
         app.setup_context(&app.context);
         app.setup_window();
         app.setup_actions();
@@ -456,7 +459,7 @@ impl App {
     fn setup_tray(self: &Rc<Self>, icon_dir: &std::path::Path) {
         let mut tray =
             AppIndicator::with_path("webtabs", "webtabs-tray", &icon_dir.to_string_lossy());
-        tray.set_title("webtabs");
+        tray.set_title("WebTabs");
         tray.set_attention_icon_full("webtabs-tray-unread", "Unread messages");
         tray.set_status(AppIndicatorStatus::Active);
 
@@ -501,22 +504,59 @@ impl App {
 
     /// Changes app-wide options from the settings window and persists them.
     fn update_options(&self, f: impl FnOnce(&mut Config)) {
+        // A delayed save still pending is covered by this one.
+        if let Some(id) = self.save_later.take() {
+            id.remove();
+        }
         f(&mut self.config.borrow_mut());
         self.apply_options();
         self.save();
     }
 
-    fn apply_options(&self) {
-        let tray_on = self.config.borrow().tray;
-        if let Some(row) = self
-            .settings_close_row
-            .borrow()
-            .as_ref()
-            .and_then(|w| w.upgrade())
-        {
-            row.set_sensitive(tray_on);
+    /// Applies a change now and saves it once changes stop for half a second
+    /// (a dragged slider or colour picker would otherwise write on every step).
+    fn update_options_later(self: &Rc<Self>, f: impl FnOnce(&mut Config)) {
+        f(&mut self.config.borrow_mut());
+        self.apply_options();
+        if let Some(id) = self.save_later.take() {
+            id.remove();
         }
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            if let Some(app) = weak.upgrade() {
+                app.save_later.take();
+                app.save();
+            }
+        });
+        self.save_later.replace(Some(id));
+    }
+
+    fn apply_options(&self) {
+        self.apply_appearance();
         self.refresh_unread();
+        self.refresh_settings();
+    }
+
+    /// Icon size and tint: re-resolves the bar's look (also on a theme switch).
+    fn apply_appearance(&self) {
+        let (size, tint) = {
+            let cfg = self.config.borrow();
+            (cfg.icon_size, cfg.tint.clone())
+        };
+        let look = tabbar::Look::resolve(&self.window, size, tint.as_deref());
+        let resized = look.metrics != self.look.get().metrics;
+        self.look.set(look);
+        tabbar::paint_bar(&self.bar, &look);
+        for t in [&self.add_tile, &self.gear_tile] {
+            t.resize();
+        }
+        for tv in self.tabs.borrow().iter() {
+            if resized {
+                tv.tile.resize();
+            } else {
+                tv.tile.area.queue_draw();
+            }
+        }
     }
 
     fn error(&self, title: &str, detail: &str) {
@@ -559,43 +599,14 @@ impl App {
         };
         let webview = web::new_webview(&self.context_for(tab), &settings, home.clone());
 
-        // Icon with the unread bubble pinned to its top-right corner.
-        let icon = gtk::Image::from_icon_name(Some("applications-internet"), gtk::IconSize::Dnd);
-        icon.set_pixel_size(TAB_ICON_PX);
-        icon.set_margin_top(5);
-        icon.set_margin_end(7);
-        icon.set_margin_start(3);
-        let badge_label = gtk::Label::new(None);
-        badge_label.style_context().add_class("badge");
-        badge_label.set_halign(gtk::Align::End);
-        badge_label.set_valign(gtk::Align::Start);
-        badge_label.set_no_show_all(true);
-        // Optional tag (e.g. "W") bottom-left, to tell same-service tabs apart.
-        let tag_label = gtk::Label::new(None);
-        tag_label.style_context().add_class("tag");
-        tag_label.set_halign(gtk::Align::Start);
-        tag_label.set_valign(gtk::Align::End);
-        tag_label.set_no_show_all(true);
-        let overlay = gtk::Overlay::new();
-        overlay.add(&icon);
-        overlay.add_overlay(&badge_label);
-        overlay.add_overlay(&tag_label);
-        let button = gtk::Button::new();
-        button.style_context().add_class("tab");
-        button.set_relief(gtk::ReliefStyle::None);
-        button.set_focus_on_click(false);
-        hand_cursor(&button);
-        button.add(&overlay);
-        button.show_all();
+        let tile = tabbar::Tile::new(tabbar::Kind::Tab, &self.look);
+        tile.area.show();
 
         let tv = Rc::new(TabView {
             id: self.next_id.replace(self.next_id.get() + 1),
             tab: RefCell::new(tab.clone()),
             webview: webview.clone(),
-            button: button.clone(),
-            badge_label,
-            tag_label,
-            icon,
+            tile: tile.clone(),
             pixbuf: RefCell::default(),
             icon_fetched: Cell::new(false),
             icon_gen: Cell::new(0),
@@ -612,7 +623,7 @@ impl App {
         }
         // Re-render crisp when the window moves to a screen with another scale.
         let tab_w = Rc::downgrade(&tv);
-        tv.icon.connect_scale_factor_notify(move |_| {
+        tv.tile.area.connect_scale_factor_notify(move |_| {
             if let Some(tv) = tab_w.upgrade() {
                 let p = tv.pixbuf.borrow().clone();
                 if let Some(p) = p {
@@ -631,8 +642,7 @@ impl App {
             };
             let badge = Badge::from_title(wv.title().as_deref().unwrap_or(""));
             if tv.badge.replace(badge) != badge {
-                tv.badge_label.set_text(&badge.label());
-                tv.badge_label.set_visible(badge.is_unread());
+                tv.tile.set_badge(&badge.label());
                 tv.update_tooltip();
                 app.refresh_unread();
             }
@@ -681,13 +691,13 @@ impl App {
         });
 
         let (app_w, tab_w) = (Rc::downgrade(self), Rc::downgrade(&tv));
-        button.connect_clicked(move |_| {
+        tile.connect_click(move || {
             if let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade()) {
                 app.select(&tv);
             }
         });
         let (app_w, tab_w) = (Rc::downgrade(self), Rc::downgrade(&tv));
-        button.connect_button_press_event(move |_, ev| {
+        tile.area.connect_button_press_event(move |_, ev| {
             let (Some(app), Some(tv)) = (app_w.upgrade(), tab_w.upgrade()) else {
                 return glib::Propagation::Proceed;
             };
@@ -706,7 +716,7 @@ impl App {
 
         webview.show();
         self.stack.add(&webview);
-        self.tab_bar.pack_start(&button, false, false, 0);
+        self.tab_bar.pack_start(&tile.area, false, false, 0);
         tv
     }
 
@@ -750,12 +760,7 @@ impl App {
         self.current.set(tv.id);
         self.stack.set_visible_child(&tv.webview);
         for t in self.tabs.borrow().iter() {
-            let sc = t.button.style_context();
-            if t.id == tv.id {
-                sc.add_class("active");
-            } else {
-                sc.remove_class("active");
-            }
+            t.tile.set_active(t.id == tv.id);
         }
         tv.load();
         let wv = tv.webview.clone();
@@ -779,8 +784,27 @@ impl App {
     /// Makes the bar's button order match `self.tabs`.
     fn sync_bar(&self) {
         for (i, tv) in self.tabs.borrow().iter().enumerate() {
-            self.tab_bar.reorder_child(&tv.button, i as i32);
+            self.tab_bar.reorder_child(&tv.tile.area, i as i32);
         }
+    }
+
+    /// Moves a tab to position `to` (Settings' drag and drop).
+    fn move_tab_to(&self, tv: &Rc<TabView>, to: usize) {
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let Some(from) = tabs.iter().position(|t| t.id == tv.id) else {
+                return;
+            };
+            let to = to.min(tabs.len() - 1);
+            if from == to {
+                return;
+            }
+            let t = tabs.remove(from);
+            tabs.insert(to, t);
+        }
+        self.sync_bar();
+        self.save();
+        self.refresh_settings();
     }
 
     fn move_tab(&self, tv: &Rc<TabView>, delta: isize) {
@@ -868,7 +892,7 @@ impl App {
             self.exit_fullscreen();
         }
         self.stack.remove(&tv.webview);
-        self.tab_bar.remove(&tv.button);
+        self.tab_bar.remove(&tv.tile.area);
         tv.webview.try_close();
     }
 
@@ -1062,9 +1086,9 @@ impl App {
         drop(cfg);
         self.update_launcher(total, in_launcher && total > 0);
         self.window.set_title(&if total > 0 && in_title {
-            format!("webtabs ({total})")
+            format!("WebTabs ({total})")
         } else {
-            "webtabs".into()
+            "WebTabs".into()
         });
         if let Some(tray) = self.tray.borrow_mut().as_mut() {
             tray.set_status(if !tray_on {
@@ -1325,7 +1349,7 @@ impl App {
         let new = match Config::parse(&text) {
             Ok(c) => c,
             Err(e) => {
-                let gn = gio::Notification::new("webtabs: tabs.toml not applied");
+                let gn = gio::Notification::new("WebTabs: tabs.toml not applied");
                 gn.set_body(Some(&e));
                 self.gapp.send_notification(Some("config-error"), &gn);
                 return;

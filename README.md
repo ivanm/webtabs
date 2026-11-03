@@ -109,7 +109,7 @@ them inside Slack.
 | Show notifications | Desktop notifications from your tabs |
 | Show icon in tray | Unread indicator and quick menu |
 | Close to tray | Closing the window keeps WebTabs running |
-| Unread count in window title | e.g. "webtabs (5)" |
+| Unread count in window title | e.g. "WebTabs (5)" |
 | Unread count on Dock / launcher icon | macOS Dock; Linux docks that support badges (KDE, Dash to Dock, Plank) |
 | GPU acceleration | Linux and Windows; turn off only if pages render wrong. Applies after a restart |
 
