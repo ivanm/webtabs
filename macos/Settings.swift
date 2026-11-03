@@ -510,18 +510,22 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     let name = NSTextField(labelWithString: "WebTabs")
     name.font = .systemFont(ofSize: 22, weight: .semibold)
     let info = Bundle.main.infoDictionary ?? [:]
-    let version = NSTextField(
-      labelWithString: "Version \(info["CFBundleShortVersionString"] as? String ?? "?")")
-    version.textColor = .secondaryLabelColor
-    let blurb = NSTextField(labelWithString: "Your web apps in one window, signed in and quiet.")
+    let number = info["CFBundleShortVersionString"] as? String ?? "?"
+    let version = linkLabel(
+      [("v\(number) by ", nil), ("vaan.dev", "https://vaan.dev")], size: NSFont.systemFontSize)
+    let license = linkLabel(
+      [
+        ("Licensed under the ", nil),
+        ("GPL 3.0 or later", "https://www.gnu.org/licenses/gpl-3.0.html"),
+      ], size: NSFont.smallSystemFontSize)
     let config = NSButton(title: "Open tabs.toml", target: self, action: #selector(openToml))
     let site = NSButton(title: "Website", target: self, action: #selector(openSite))
     let buttons = NSStackView(views: [config, site])
-    let stack = NSStackView(views: [icon, name, version, blurb, buttons])
+    let stack = NSStackView(views: [icon, name, version, license, buttons])
     stack.orientation = .vertical
-    stack.spacing = 8
+    stack.spacing = 6
     stack.setCustomSpacing(14, after: icon)
-    stack.setCustomSpacing(14, after: blurb)
+    stack.setCustomSpacing(16, after: license)
     stack.edgeInsets = NSEdgeInsets(top: 96, left: 32, bottom: 32, right: 32)
     stack.setHuggingPriority(.defaultLow, for: .vertical)
     return stack
@@ -600,6 +604,23 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
 }
 
 private final class Section: NSStackView {}
+
+/// Secondary text with clickable links, e.g. "v0.3.0 by vaan.dev".
+private func linkLabel(_ parts: [(String, String?)], size: CGFloat) -> NSTextField {
+  let text = NSMutableAttributedString()
+  for (string, link) in parts {
+    var attributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.systemFont(ofSize: size), .foregroundColor: NSColor.secondaryLabelColor,
+    ]
+    if let link, let url = URL(string: link) { attributes[.link] = url }
+    text.append(NSAttributedString(string: string, attributes: attributes))
+  }
+  let label = NSTextField(labelWithAttributedString: text)
+  // Links only open from a selectable field.
+  label.isSelectable = true
+  label.allowsEditingTextAttributes = true
+  return label
+}
 
 private func note(_ text: String) -> NSTextField {
   let l = NSTextField(wrappingLabelWithString: text)
