@@ -609,7 +609,7 @@ fn appearance_page(app: &Rc<App>, ui: &Rc<Ui>) -> gtk::Box {
             "Icon size",
             &[
                 size_row.upcast(),
-                note("Above 24 pt the title bar grows to fit the icons.").upcast(),
+                note("Above 24 pt the tab bar grows to fit the icons.").upcast(),
             ],
         ),
         section(

@@ -199,8 +199,9 @@ fn create_window(owner: HWND, what: Open) -> Option<HWND> {
     // centred over the main window, clamped to the work area.
     let (w, h) = match what {
         Open::Settings => (760, 620),
-        Open::Add => (560, 620),
-        Open::Edit(_) => (560, 600),
+        // Tall enough for the form with Options open (clamped to the screen).
+        Open::Add => (560, 720),
+        Open::Edit(_) => (560, 640),
     };
     let dpi = unsafe { GetDpiForWindow(owner) }.max(96) as i32;
     let mut mi = MONITORINFO {

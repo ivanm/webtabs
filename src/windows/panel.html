@@ -159,7 +159,10 @@
   .about .buttons { display: flex; gap: 8px; margin-top: 10px; }
 
   /* Add / edit form */
-  #form { height: 100%; overflow-y: auto; padding: 20px 24px; display: none; flex-direction: column; gap: 14px; }
+  /* The fields scroll if they must; Cancel / Add Tab stay pinned below them. */
+  #form { height: 100%; display: none; flex-direction: column; }
+  #form .form-body { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 24px 8px; display: flex; flex-direction: column; gap: 14px; }
+  #form > .footer { flex: none; margin: 0; padding: 12px 24px 16px; border-top: 1px solid var(--line); }
   #form.on { display: flex; }
   #form h1 { margin: 0; font-size: 15px; font-weight: 600; }
   /* Fits five presets in a row (wraps if more come). */
@@ -252,6 +255,7 @@
 </div>
 
 <div id="form">
+  <div class="form-body">
   <h1 id="formTitle">Add a web app</h1>
   <div class="presets" id="presets"></div>
   <div class="field">
@@ -291,7 +295,7 @@
       <div class="hint">Change it only if a site says your browser isn’t supported.</div>
     </div>
   </div>
-  <div class="spacer"></div>
+  </div>
   <div class="footer">
     <button class="btn" id="cancel">Cancel</button>
     <button class="btn primary" id="save">Add Tab</button>
