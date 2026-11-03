@@ -5,14 +5,15 @@
 //! hints, session keys, saving) runs here through the same `App` methods the
 //! tab bar uses. Changes apply immediately and are written to tabs.toml.
 
-use super::{App, TabView, app, autostart, icons, web};
-use crate::config::{self, Tab, USER_AGENT_PRESETS};
+use super::{App, TabView, app, autostart, chrome, icons, paint, web};
+use crate::appearance::{BarMetrics, Tint, tint_label, tint_names};
+use crate::config::{self, ICON_SIZES, Tab, USER_AGENT_PRESETS};
 use crate::presets::PRESETS;
 use crate::{favicon, links};
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::Graphics::Gdi::{
-    CreateSolidBrush, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow,
+    CreateSolidBrush, DeleteObject, FillRect, GetMonitorInfoW, HDC, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -36,8 +37,20 @@ const WM_APP_REFRESH: u32 = WM_APP + 21;
 const WM_APP_PRESET_ICON: u32 = WM_APP + 22;
 /// Download generation for preset icons; keeps their temp files apart from tabs'.
 const PRESET_GEN: u64 = u64::MAX;
-/// Page background (matches panel.html's --bg), shown before the page paints.
-const BG: (u8, u8, u8) = (0xf3, 0xf3, 0xf3);
+/// Saves tabs.toml once the icon size slider or colour picker settles.
+const TIMER_SAVE: usize = 1;
+const SAVE_DELAY_MS: u32 = 500;
+/// The app icon for About (sent once).
+const APP_ICON: &[u8] = include_bytes!("../../assets/webtabs.png");
+
+/// Page background (panel.html's --win), shown before the page paints.
+fn background(dark: bool) -> (u8, u8, u8) {
+    if dark {
+        (0x1d, 0x1d, 0x1f)
+    } else {
+        (0xff, 0xff, 0xff)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Open {
@@ -57,6 +70,11 @@ struct Panel {
     /// What to show once the page has loaded.
     pending: Cell<Option<Open>>,
     refresh_posted: Cell<bool>,
+    /// An appearance change waits to be written to tabs.toml.
+    save_pending: Cell<bool>,
+    /// The About icon went out with an earlier state.
+    icon_sent: Cell<bool>,
+    dark: Cell<bool>,
 }
 
 thread_local! {
@@ -98,7 +116,11 @@ pub fn open(app: &App, what: Open) {
         ready: Cell::new(false),
         pending: Cell::new(Some(what)),
         refresh_posted: Cell::new(false),
+        save_pending: Cell::new(false),
+        icon_sent: Cell::new(false),
+        dark: Cell::new(app.dark.get()),
     });
+    chrome::set_dark_frame(hwnd, app.dark.get());
     PANEL.with(|p| *p.borrow_mut() = Some(panel.clone()));
     unsafe {
         // Modal, like the Linux dialogs: the tab bar waits until this closes.
@@ -122,6 +144,18 @@ pub fn open(app: &App, what: Open) {
             }
         }
     });
+}
+
+/// The system theme changed: follow it in the window frame and background.
+pub fn appearance_changed() {
+    let (Some(p), Some(app)) = (panel(), app()) else {
+        return;
+    };
+    let dark = app.dark.get();
+    if p.dark.replace(dark) != dark {
+        chrome::set_dark_frame(p.hwnd, dark);
+        p.set_background();
+    }
 }
 
 /// Resends the app state to an open window (after any change, from anywhere).
@@ -153,7 +187,6 @@ fn create_window(owner: HWND, what: Open) -> Option<HWND> {
             hIcon: icon(GCLP_HICON),
             hIconSm: icon(GCLP_HICONSM),
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
-            hbrBackground: HBRUSH(unsafe { CreateSolidBrush(rgb(BG)) }.0),
             lpszClassName: CLASS,
             ..Default::default()
         };
@@ -165,9 +198,9 @@ fn create_window(owner: HWND, what: Open) -> Option<HWND> {
     // Sizes in DIPs, like the GTK dialogs; scaled to the owner's monitor and
     // centred over the main window, clamped to the work area.
     let (w, h) = match what {
-        Open::Settings => (560, 760),
-        Open::Add => (540, 560),
-        Open::Edit(_) => (540, 440),
+        Open::Settings => (760, 620),
+        Open::Add => (560, 620),
+        Open::Edit(_) => (560, 600),
     };
     let dpi = unsafe { GetDpiForWindow(owner) }.max(96) as i32;
     let mut mi = MONITORINFO {
@@ -188,7 +221,7 @@ fn create_window(owner: HWND, what: Open) -> Option<HWND> {
         CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             CLASS,
-            w!("webtabs settings"),
+            w!("WebTabs Settings"),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
             x,
             y,
@@ -213,15 +246,9 @@ impl Panel {
             self.close();
             return;
         };
+        *self.controller.borrow_mut() = Some(controller.clone());
+        self.set_background();
         unsafe {
-            if let Ok(c2) = controller.cast::<ICoreWebView2Controller2>() {
-                let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
-                    A: 255,
-                    R: BG.0,
-                    G: BG.1,
-                    B: BG.2,
-                });
-            }
             if let Ok(s) = wv.Settings() {
                 let debug = std::env::var_os("WEBTABS_DEBUG").is_some();
                 let _ = s.SetAreDevToolsEnabled(debug);
@@ -245,6 +272,40 @@ impl Panel {
             let _ = wv.NavigateToString(&HSTRING::from(PAGE));
         }
         web::focus(&controller);
+    }
+
+    /// The window and webview background for the theme (seen before the page
+    /// paints, and while resizing).
+    fn set_background(&self) {
+        let (r, g, b) = background(self.dark.get());
+        if let Some(c2) = self
+            .controller
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.cast::<ICoreWebView2Controller2>().ok())
+        {
+            unsafe {
+                let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                    A: 255,
+                    R: r,
+                    G: g,
+                    B: b,
+                });
+            }
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+        }
+    }
+
+    fn paint_background(&self, hdc: HDC) {
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut rc);
+            let brush = CreateSolidBrush(rgb(background(self.dark.get())));
+            FillRect(hdc, &rc, brush);
+            let _ = DeleteObject(brush.into());
+        }
     }
 
     fn setup_events(&self, wv: &ICoreWebView2) -> ::windows::core::Result<()> {
@@ -336,7 +397,20 @@ impl Panel {
         }
     }
 
+    /// Writes an appearance change the slider or picker left pending.
+    fn flush_save(&self, app: &App) {
+        if self.save_pending.replace(false) {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_SAVE);
+            }
+            app.save();
+        }
+    }
+
     fn on_destroy(&self) {
+        if let Some(app) = app() {
+            self.flush_save(&app);
+        }
         if let Some(c) = self.controller.borrow_mut().take() {
             unsafe {
                 let _ = c.Close();
@@ -373,6 +447,32 @@ impl Panel {
             .iter()
             .map(|p| json!({"name": p.name, "url": p.url, "icon": cached_icon(p.url)}))
             .collect();
+        let hex = |c: u32| format!("#{c:06x}");
+        // The preview draws exactly what the bar will: shared colours and geometry.
+        let tints: Vec<Value> = tint_names()
+            .iter()
+            .filter_map(|name| {
+                let t = Tint::parse(Some(name))?;
+                Some(json!({
+                    "name": name,
+                    "label": tint_label(Some(name), ""),
+                    "light": hex(t.color(false)),
+                    "dark": hex(t.color(true)),
+                }))
+            })
+            .collect();
+        let metrics: serde_json::Map<String, Value> = ICON_SIZES
+            .map(|size| {
+                let m = BarMetrics::new(size);
+                (
+                    size.to_string(),
+                    json!({"icon": m.icon, "height": m.height, "tile": m.tile,
+                           "tile_y": m.tile_y, "radius": m.radius}),
+                )
+            })
+            .collect();
+        let app_icon = (!self.icon_sent.replace(true))
+            .then(|| format!("data:image/png;base64,{}", base64(APP_ICON)));
         self.post(json!({
             "cmd": "state",
             "options": {
@@ -380,12 +480,23 @@ impl Panel {
                 "tray": cfg.tray,
                 "close_to_tray": cfg.close_to_tray,
                 "unread_in_title": cfg.unread_in_title,
+                "unread_in_dock": cfg.unread_in_dock,
                 "gpu_acceleration": cfg.gpu_acceleration,
+                "icon_size": cfg.icon_size,
+                "tint": cfg.tint,
             },
             "autostart": autostart::is_enabled(),
             "tabs": tabs,
             "presets": presets,
             "ua_presets": USER_AGENT_PRESETS,
+            "tints": tints,
+            "bar_light": hex(paint::BAR_LIGHT),
+            "bar_dark": hex(paint::BAR_DARK),
+            "metrics": metrics,
+            "icon_min": ICON_SIZES.start(),
+            "icon_max": ICON_SIZES.end(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "app_icon": app_icon,
         }));
     }
 
@@ -432,6 +543,7 @@ impl Panel {
                     "tray" => c.tray = on,
                     "close_to_tray" => c.close_to_tray = on,
                     "unread_in_title" => c.unread_in_title = on,
+                    "unread_in_dock" => c.unread_in_dock = on,
                     "gpu_acceleration" => c.gpu_acceleration = on,
                     _ => {}
                 });
@@ -463,6 +575,32 @@ impl Panel {
                 self.post(json!({"cmd": "hint", "text": text}));
             }
             "save_tab" => self.save_tab(app, m, tab()),
+            // The slider and the colour picker: applied now, saved once they settle.
+            "appearance" => {
+                let size = m["icon_size"].as_u64();
+                let tint = m
+                    .get("tint")
+                    .map(|t| t.as_str().and_then(config::normalize_tint));
+                app.preview_options(|c| {
+                    if let Some(size) = size {
+                        c.icon_size = (size as u32).clamp(*ICON_SIZES.start(), *ICON_SIZES.end());
+                    }
+                    if let Some(tint) = tint {
+                        c.tint = tint;
+                    }
+                });
+                self.save_pending.set(true);
+                unsafe {
+                    SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_DELAY_MS, None);
+                }
+            }
+            "reorder" => {
+                if let Some(tv) = tab() {
+                    app.move_tab_to(&tv, m["to"].as_u64().unwrap_or(0) as usize);
+                }
+            }
+            "open_site" => web::open_external("https://github.com/ivanm/webtabs"),
+            "open_vaan" => web::open_external("https://vaan.dev"),
             "open_toml" => app.edit_config(),
             "close" => self.close(),
             other => eprintln!("webtabs: settings window: unknown message {other:?}"),
@@ -540,7 +678,7 @@ fn isolation_hint(app: &App, url: &str, editing_url: Option<&str>, isolated: boo
         })
         .map(|t| {
             format!(
-                "Shares its login with your \u{201c}{}\u{201d} tab. Tick Isolated login to use a different account.",
+                "This would share its login with your \u{201c}{}\u{201d} tab. Turn on Own login in Options to use a different account.",
                 t.name
             )
         })
@@ -606,6 +744,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     };
     match msg {
         WM_SIZE => p.layout(),
+        WM_ERASEBKGND => {
+            p.paint_background(HDC(wparam.0 as *mut _));
+            return LRESULT(1);
+        }
+        WM_TIMER if wparam.0 == TIMER_SAVE => {
+            if let Some(app) = app() {
+                p.flush_save(&app);
+            }
+        }
         WM_GETMINMAXINFO => {
             let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as i32;
             let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };

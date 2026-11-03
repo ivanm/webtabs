@@ -1,154 +1,300 @@
 <!doctype html>
-<!-- webtabs settings and add/edit tab form on Windows, hosted in WebView2 by
-     panel.rs. Mirrors src/linux/settings.rs and src/linux/tab_dialog.rs; all
-     state and rules live in Rust, this page only renders and forwards clicks. -->
+<!-- WebTabs settings (General, Tabs, Appearance, About) and the add/edit tab
+     form on Windows, hosted in WebView2 by panel.rs. Mirrors macos/Settings.swift
+     and macos/TabDialog.swift (the "Panel-settings" / "Panel-add" designs). All
+     state and rules live in Rust: this page renders and forwards clicks. -->
 <html>
 <head>
 <meta charset="utf-8">
 <style>
   :root {
-    --bg: #f3f3f3; --card: #ffffff; --line: #e5e5e5; --text: #1b1b1b; --dim: #616161;
-    --accent: #005fb8; --accent-hover: #0067c0; --hover: #f0f0f0; --press: #e8e8e8;
-    --error: #c42b1c; --off: #8a8a8a;
+    --win: #ffffff; --side: #f6f6f8; --line: rgba(0,0,0,.08); --line2: rgba(0,0,0,.14);
+    --text: #1c1c1e; --dim: #66666d; --faint: #a8a8ae; --active: rgba(0,0,0,.06);
+    --hover: rgba(0,0,0,.04); --on: #e5500f; --off: #c9c9ce; --accent: #e5500f;
+    --field: rgba(0,0,0,.16); --chip: #f3f3f5; --sel: rgba(229,80,15,.07);
+    --seg: #efeff2; --seg-on: #ffffff; --primary: #1c1c1e; --on-primary: #ffffff;
+    --link: #c2410c; --error: #c42b1c; --menu: #ffffff; --tag-bg: #1c1c1e; --tag-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --win: #1d1d1f; --side: #222225; --line: rgba(255,255,255,.08); --line2: rgba(255,255,255,.16);
+      --text: #eeeef0; --dim: #a3a3aa; --faint: #6f6f76; --active: rgba(255,255,255,.09);
+      --hover: rgba(255,255,255,.05); --on: #ff6a2b; --off: #4a4a50; --accent: #ff6a2b;
+      --field: rgba(255,255,255,.16); --chip: rgba(255,255,255,.05); --sel: rgba(255,106,43,.14);
+      --seg: rgba(255,255,255,.07); --seg-on: #3a3a3f; --primary: #eeeef0; --on-primary: #1d1d1f;
+      --link: #ff8a55; --error: #ff6b5e; --menu: #2c2c2f; --tag-bg: #eeeef0; --tag-text: #1d1d1f;
+    }
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; }
   body {
-    font: 14px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-    color: var(--text); background: var(--bg); user-select: none; overflow: hidden;
+    font: 13px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    color: var(--text); background: var(--win); overflow: hidden; user-select: none;
   }
-  .view { display: none; height: 100%; flex-direction: column; padding: 18px; gap: 6px; }
-  .view.on { display: flex; }
-  h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
-  h2.gap { margin-top: 14px; }
-  .frame { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-  .row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
-  .row + .row { border-top: 1px solid var(--line); }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: default; }
+
+  #settings { display: flex; height: 100%; }
+  nav {
+    width: 176px; flex: none; padding: 16px 10px; display: flex; flex-direction: column; gap: 2px;
+    background: var(--side); border-right: 1px solid var(--line);
+  }
+  nav button {
+    display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border: 0;
+    border-radius: 7px; background: transparent; color: var(--dim); font-weight: 500; text-align: left;
+  }
+  nav button:hover { background: var(--hover); }
+  nav button .dot { width: 6px; height: 6px; border-radius: 3px; background: transparent; flex: none; }
+  nav button[aria-current="page"] { background: var(--active); color: var(--text); font-weight: 600; }
+  nav button[aria-current="page"] .dot { background: var(--accent); }
+  main.pane { flex: 1; min-width: 0; overflow-y: auto; padding: 22px 32px; display: none; flex-direction: column; gap: 22px; }
+  main.pane.on { display: flex; }
+
+  section { display: flex; flex-direction: column; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+  section:last-child { border-bottom: 0; padding-bottom: 0; }
+  h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+  .row { display: flex; align-items: center; gap: 16px; }
+  .row.indent { padding-left: 18px; }
   .grow { flex: 1; min-width: 0; }
-  .sub { color: var(--dim); font-size: 12px; }
-  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .label { font-weight: 500; }
+  .hint, .note { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .note { margin: 0; }
   .disabled { opacity: .45; pointer-events: none; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Windows 11 style toggle switch */
-  .switch { position: relative; width: 40px; height: 20px; flex: none; }
-  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-  .switch span {
-    position: absolute; inset: 0; border-radius: 10px; border: 1px solid var(--off);
-    background: transparent; transition: background .12s, border-color .12s; pointer-events: none;
-  }
+  /* Switch, as in the designs */
+  .switch { position: relative; width: 34px; height: 20px; flex: none; }
+  .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; }
+  .switch span { position: absolute; inset: 0; border-radius: 10px; background: var(--off); transition: background .12s; pointer-events: none; }
   .switch span::after {
-    content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px;
-    border-radius: 50%; background: #5d5d5d; transition: transform .12s, background .12s;
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 8px;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .12s;
   }
-  .switch input:checked + span { background: var(--accent); border-color: var(--accent); }
-  .switch input:checked + span::after { background: #fff; transform: translateX(20px); }
-  .switch input:focus-visible + span { outline: 2px solid var(--text); outline-offset: 2px; }
+  .switch input:checked + span { background: var(--on); }
+  .switch input:checked + span::after { transform: translateX(14px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  #tabs { flex: 1; min-height: 120px; overflow-y: auto; }
-  #tabs .row { padding: 8px 10px; gap: 10px; }
-  .favicon { width: 24px; height: 24px; flex: none; border-radius: 5px; object-fit: contain; }
-  .letter {
-    width: 24px; height: 24px; flex: none; border-radius: 6px; color: #fff; font-weight: 600;
-    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  .btn {
+    height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--field);
+    background: transparent; display: inline-flex; align-items: center; gap: 6px;
   }
-  .empty { color: var(--dim); text-align: center; padding: 18px; }
+  .btn:hover { background: var(--hover); }
+  .btn.primary { border: 0; background: var(--primary); color: var(--on-primary); font-weight: 600; padding: 0 18px; }
+  .btn.primary:hover { opacity: .9; }
+  .btn svg { width: 12px; height: 12px; }
+  .link { border: 0; background: transparent; color: var(--link); padding: 0; }
+  .link:hover { text-decoration: underline; }
+  .icon-btn {
+    width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--dim);
+    display: inline-flex; align-items: center; justify-content: center; padding: 0; flex: none;
+  }
+  .icon-btn:hover { background: var(--active); }
+  .icon-btn.muted { color: var(--faint); }
+  .icon-btn svg { width: 16px; height: 16px; }
 
-  button {
-    font: inherit; color: var(--text); background: var(--card); border: 1px solid #d1d1d1;
-    border-bottom-color: #bdbdbd; border-radius: 4px; padding: 5px 14px; min-height: 32px;
+  /* Tabs pane */
+  #tablist { display: flex; flex-direction: column; }
+  .tabrow { display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 4px 0 0; border-top: 1px solid var(--line); position: relative; }
+  .tabrow:first-child { border-top: 0; }
+  .tabrow.drop-before::before, .tabrow.drop-after::after {
+    content: ""; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); border-radius: 1px;
   }
-  button:hover { background: #f6f6f6; }
-  button:active { background: var(--press); }
-  button:disabled { opacity: .45; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover { background: var(--accent-hover); }
-  button.icon {
-    border: none; background: transparent; width: 32px; height: 32px; min-height: 0; padding: 0;
-    display: inline-flex; align-items: center; justify-content: center; border-radius: 4px;
+  .tabrow.drop-before::before { top: -1px; }
+  .tabrow.drop-after::after { bottom: -1px; }
+  .tabrow.dragging { opacity: .4; }
+  .grip { width: 14px; display: grid; place-items: center; color: var(--faint); cursor: grab; flex: none; }
+  .ticon { position: relative; width: 26px; height: 26px; flex: none; }
+  .ticon img, .ticon .letter { width: 26px; height: 26px; border-radius: 7px; }
+  .letter { display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+  .ticon .tag {
+    position: absolute; left: -3px; bottom: -3px; min-width: 12px; height: 12px; padding: 0 2px; border-radius: 3px;
+    background: var(--tag-bg); color: var(--tag-text); font-size: 7px; font-weight: 800; line-height: 12px;
+    text-align: center; box-shadow: 0 0 0 1.5px var(--win);
   }
-  button.icon:hover:not(:disabled) { background: var(--hover); }
-  button.icon:active:not(:disabled) { background: var(--press); }
-  button.icon svg { width: 16px; height: 16px; }
-  button.icon.on { color: var(--accent); }
-  button.with-icon { display: inline-flex; align-items: center; gap: 6px; }
-  button.with-icon svg { width: 14px; height: 14px; }
-  .actions { display: flex; justify-content: space-between; margin-top: 4px; }
-  .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  .chip { font-size: 11px; color: var(--dim); border: 1px solid var(--line2); border-radius: 5px; padding: 0 5px; }
+  .url { font-size: 11px; color: var(--dim); }
+  .empty { color: var(--dim); text-align: center; padding: 24px 0; }
+  .menu {
+    position: fixed; z-index: 10; min-width: 150px; padding: 4px; border-radius: 8px; background: var(--menu);
+    border: 1px solid var(--line2); box-shadow: 0 8px 24px rgba(0,0,0,.18); display: flex; flex-direction: column;
+  }
+  .menu button { height: 28px; border: 0; border-radius: 5px; background: transparent; text-align: left; padding: 0 10px; }
+  .menu button:hover:not(:disabled) { background: var(--active); }
+  .menu button:disabled { color: var(--faint); }
+  .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  .actions { display: flex; justify-content: space-between; align-items: center; }
 
-  /* Add / edit tab form */
-  #form { gap: 14px; overflow-y: auto; }
-  .presets { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
+  /* Appearance pane */
+  .preview { border-radius: 10px; border: 1px solid var(--line2); overflow: hidden; }
+  .pbar { display: flex; align-items: flex-start; gap: 8px; padding-left: 10px; position: relative; border-bottom: 1px solid rgba(128,128,128,.18); }
+  .pbar .tile { position: relative; flex: none; }
+  .pbar .tile .hl { position: absolute; left: 0; }
+  .pbar .tile img, .pbar .tile .letter { position: absolute; border-radius: 5px; }
+  .pbar .badge {
+    position: absolute; height: 20px; min-width: 20px; padding: 0 6px; border-radius: 10px; border: 2px solid;
+    background: #d93036; color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  }
+  .pbar .marker { position: absolute; width: 14px; height: 3px; border-radius: 1.5px; }
+  .pbar .tool { flex: none; width: 28px; height: 28px; display: grid; place-items: center; }
+  .ppage { height: 46px; background: var(--win); }
+  .sizerow { display: flex; align-items: center; gap: 10px; }
+  .sizerow input[type=range] { flex: 1; accent-color: var(--accent); }
+  .sizerow .glyph { width: 10px; height: 10px; border-radius: 3px; background: var(--faint); flex: none; }
+  .sizerow .glyph.big { width: 17px; height: 17px; border-radius: 4px; }
+  .sizelabel { width: 44px; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+  .swatch {
+    width: 28px; height: 28px; border-radius: 14px; padding: 0; border: 1px solid var(--line2); position: relative;
+  }
+  .swatch[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .swatch.custom { background: conic-gradient(#ff5f57, #febc2e, #28c840, #2aa9ff, #a55bff, #ff5f57); }
+  .swatch.custom.set { background: var(--custom); }
+  .tintlabel { font-size: 12px; color: var(--dim); }
+
+  /* About pane */
+  .about { align-items: center; justify-content: center; text-align: center; gap: 8px; height: 100%; }
+  .about img { width: 72px; height: 72px; }
+  .about .name { font-size: 22px; font-weight: 600; }
+  .about .buttons { display: flex; gap: 8px; margin-top: 10px; }
+
+  /* Add / edit form */
+  #form { height: 100%; overflow-y: auto; padding: 20px 24px; display: none; flex-direction: column; gap: 14px; }
+  #form.on { display: flex; }
+  #form h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  /* Fits five presets in a row (wraps if more come). */
+  .presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 8px; }
   .preset {
-    display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 4px;
-    border: none; background: transparent; border-radius: 12px; min-height: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 4px 8px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--chip);
   }
-  .preset:hover { background: var(--card); }
-  .preset img, .preset .letter { width: 40px; height: 40px; border-radius: 8px; font-size: 18px; }
-  .grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
-  .grid > label.key { text-align: right; }
-  input[type=text], select {
-    font: inherit; color: var(--text); background: var(--card); border: 1px solid #d1d1d1;
-    border-bottom: 1px solid #8a8a8a; border-radius: 4px; padding: 5px 10px; min-height: 32px; width: 100%;
-    user-select: text;
+  .preset:hover { border-color: var(--line2); }
+  .preset[aria-pressed="true"] { background: var(--sel); border-color: var(--accent); }
+  .preset img, .preset .letter { width: 32px; height: 32px; border-radius: 9px; font-size: 15px; }
+  .preset span { font-size: 12px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: var(--dim); }
+  input[type=text] {
+    height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--field);
+    background: var(--win); user-select: text; width: 100%;
   }
-  input[type=text]:focus, select:focus { outline: none; border-bottom: 2px solid var(--accent); }
-  input.error { border-color: var(--error); border-bottom-color: var(--error); }
-  input.tag { width: 7em; }
-  .check { display: flex; align-items: center; gap: 8px; }
-  .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
-  .hint { color: var(--dim); font-size: 12px; }
-  details summary { cursor: default; padding: 2px 0; }
-  details .grid { margin-top: 8px; }
+  input[type=text]:focus { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 0; border-color: var(--accent); }
+  input.error { border-color: var(--error); }
+  .errortext { font-size: 12px; color: var(--error); }
+  .info { display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 12px; line-height: 1.45; margin: 0; }
+  .info svg { flex: none; margin-top: 1px; }
+  .disclosure { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; text-align: left; }
+  .disclosure svg { transition: transform .12s; }
+  .disclosure[aria-expanded="true"] svg { transform: rotate(90deg); }
+  .disclosure .title { font-weight: 600; }
+  .disclosure .summary { color: var(--dim); }
+  .options { display: flex; flex-direction: column; gap: 14px; padding-left: 18px; }
+  input.tag { width: 44px; height: 30px; text-align: center; font-weight: 600; padding: 0; }
+  .seg { display: inline-flex; align-self: flex-start; padding: 2px; border-radius: 8px; background: var(--seg); }
+  .seg button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--dim); font-size: 12px; font-weight: 500; }
+  .seg button[aria-checked="true"] { background: var(--seg-on); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
   .spacer { flex: 1; }
+  .footer { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
 <body>
 
-<div class="view" id="settings">
-  <h2>General</h2>
-  <div class="frame" id="general"></div>
-  <h2 class="gap">Tabs</h2>
-  <div class="frame" id="tabs"></div>
-  <div class="actions">
-    <button class="with-icon" id="add"><svg viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>Add tab</button>
-    <button id="toml">Open tabs.toml</button>
-  </div>
-  <div class="footer"><button id="close">Close</button></div>
+<div id="settings" hidden>
+  <nav aria-label="Settings">
+    <button data-pane="general"><span class="dot"></span>General</button>
+    <button data-pane="tabs"><span class="dot"></span>Tabs</button>
+    <button data-pane="appearance"><span class="dot"></span>Appearance</button>
+    <button data-pane="about"><span class="dot"></span>About</button>
+  </nav>
+
+  <main class="pane" id="general"></main>
+
+  <main class="pane" id="tabs">
+    <p class="note">Drag a tab to change its place in the tab bar.</p>
+    <div id="tablist" role="list" aria-label="Tabs"></div>
+    <div class="actions">
+      <button class="btn" id="add"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>Add Tab…</button>
+      <button class="link" id="toml">Open tabs.toml</button>
+    </div>
+  </main>
+
+  <main class="pane" id="appearance">
+    <div class="preview" aria-label="Preview of the tab bar"><div class="pbar" id="pbar"></div><div class="ppage"></div></div>
+    <section>
+      <h2>Icon size</h2>
+      <div class="sizerow">
+        <span class="glyph" aria-hidden="true"></span>
+        <input type="range" id="size" step="2" aria-label="Icon size">
+        <span class="glyph big" aria-hidden="true"></span>
+        <span class="sizelabel" id="sizeLabel"></span>
+      </div>
+      <p class="note">Above 24 pt the title bar grows to fit the icons.</p>
+    </section>
+    <section>
+      <h2>Title bar color</h2>
+      <div class="swatches" id="swatches"></div>
+      <div class="tintlabel" id="tintLabel"></div>
+      <p class="note">Tints the tab bar. Pages keep their own colors.</p>
+      <input type="color" id="picker" hidden>
+    </section>
+  </main>
+
+  <main class="pane about" id="about">
+    <img id="appIcon" alt="">
+    <div class="name">WebTabs</div>
+    <div class="hint"><span id="version"></span> by <button class="link" id="vaan">vaan.dev</button></div>
+    <div>Your web apps in one window, signed in and quiet.</div>
+    <div class="buttons">
+      <button class="btn" id="aboutToml">Open tabs.toml</button>
+      <button class="btn" id="site">Website</button>
+    </div>
+  </main>
 </div>
 
-<div class="view" id="form">
+<div id="form">
+  <h1 id="formTitle">Add a web app</h1>
   <div class="presets" id="presets"></div>
-  <div class="grid">
-    <label class="key" for="url">URL</label>
-    <input type="text" id="url" placeholder="https://… or pick a service above" spellcheck="false">
-    <label class="key" for="name">Name</label>
-    <input type="text" id="name" placeholder="shown when you hover the icon">
-    <label class="key" for="label">Icon tag</label>
-    <div><input type="text" id="label" class="tag" maxlength="2" placeholder="e.g. W"
-         title="Optional 1-2 letters drawn on the icon, to tell similar tabs apart"></div>
-    <span></span>
-    <label class="check"><input type="checkbox" id="isolated">Isolated login (own cookies, for a second account)</label>
-    <span></span>
-    <div><div class="hint" id="isoHint" hidden></div></div>
-    <span></span>
-    <label class="check"><input type="checkbox" id="mute">Mute notifications</label>
+  <div class="field">
+    <label for="url" id="urlLabel">Or any web address</label>
+    <input type="text" id="url" placeholder="app.example.com" spellcheck="false">
+    <div class="errortext" id="urlError" hidden>Enter a web address, like example.com</div>
   </div>
-  <details id="advanced">
-    <summary>Advanced</summary>
-    <div class="grid">
-      <label class="key" for="ua">User agent</label>
-      <select id="ua"></select>
-      <span></span>
-      <div><input type="text" id="uaCustom" placeholder="User agent string" spellcheck="false" hidden></div>
-      <span></span>
-      <div class="hint">Change only if a site says your browser isn't supported. The tab reloads.</div>
+  <div class="field">
+    <label for="name">Name</label>
+    <input type="text" id="name" placeholder="Shown when you hover the tab">
+  </div>
+  <p class="info" id="isoHint" hidden>
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M8 7.2v4M8 4.9v.1"/></svg>
+    <span id="isoText"></span>
+  </p>
+  <button class="disclosure" id="optToggle" aria-expanded="false" aria-controls="options">
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 1.5l3.5 3.5-3.5 3.5"/></svg>
+    <span class="title">Options</span><span class="summary" id="summary"></span>
+  </button>
+  <div class="options" id="options" hidden>
+    <div class="row">
+      <div class="grow"><div class="label" id="ownLabel">Own login</div><div class="hint">Separate cookies and storage, for a second account</div></div>
+      <label class="switch"><input type="checkbox" role="switch" id="own" aria-labelledby="ownLabel"><span></span></label>
     </div>
-  </details>
+    <div class="row">
+      <div class="grow"><div class="label" id="notifyLabel">Notifications</div><div class="hint">Unread badges show either way</div></div>
+      <label class="switch"><input type="checkbox" role="switch" id="notify" aria-labelledby="notifyLabel"><span></span></label>
+    </div>
+    <div class="row">
+      <div class="grow"><label class="label" for="tag">Icon tag</label><div class="hint">One or two letters on the icon, to tell similar tabs apart</div></div>
+      <input type="text" class="tag" id="tag" maxlength="2" placeholder="W">
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <div class="label" id="uaLabel">Browser identity</div>
+      <div class="seg" role="radiogroup" aria-labelledby="uaLabel" id="ua"></div>
+      <input type="text" id="uaCustom" placeholder="User agent string" spellcheck="false" aria-label="Custom browser identity" hidden>
+      <div class="hint">Change it only if a site says your browser isn’t supported.</div>
+    </div>
+  </div>
   <div class="spacer"></div>
   <div class="footer">
-    <button id="cancel">Cancel</button>
-    <button class="primary" id="save">Add tab</button>
+    <button class="btn" id="cancel">Cancel</button>
+    <button class="btn primary" id="save">Add Tab</button>
   </div>
 </div>
 
@@ -156,24 +302,27 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const post = m => window.chrome.webview.postMessage(m);
+const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#0891b2", "#db2777"];
 const SVG = {
-  bell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14h3"/></svg>',
-  muted: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14h3M2 2l12 12"/></svg>',
-  up: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>',
-  down: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>',
-  edit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M10.5 2.5l3 3L5.5 13.5H2.5v-3z"/></svg>',
-  trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v5M9.2 6.5v5"/></svg>',
+  grip: '<svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>',
+  bell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5h9l-1-1.5V7a3.5 3.5 0 0 0-7 0v3l-1 1.5zM6.5 13.5a1.6 1.6 0 0 0 3 0"/></svg>',
+  muted: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5h8.5l-1-1.5V7a3.5 3.5 0 0 0-5.6-2.8M4.6 6.4A3.5 3.5 0 0 0 4.5 7v3l-1 1.5M6.5 13.5a1.6 1.6 0 0 0 3 0M2 2l12 12"/></svg>',
+  more: '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>',
 };
 
-let S = null;         // last state from Rust
-let form = null;      // {id: tab id or null when adding, only: window opened just for the form}
+let S = null;      // state from Rust
+let form = null;   // {id: tab id or null when adding, only: window opened just for the form}
+let pane = "general";
+let dragging = false;   // the size slider is held
+let uaChoice = "default";
 
 function el(tag, props = {}, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
     if (k === "class") e.className = v;
     else if (k === "html") e.innerHTML = v;
+    else if (k === "style") e.style.cssText = v;
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? "" : v);
   }
@@ -181,105 +330,318 @@ function el(tag, props = {}, ...kids) {
   return e;
 }
 
-function icon(src, name, cls) {
-  if (src) return el("img", { class: cls, src, alt: "" });
+function icon(src, name, size) {
+  const style = size ? `width:${size}px;height:${size}px` : "";
+  if (src) return el("img", { src, alt: "", style });
   let h = 0;
   for (const c of name) h = (h * 31 + c.codePointAt(0)) >>> 0;
-  const d = el("div", { class: "letter " + (cls || "") }, (name.trim()[0] || "?").toUpperCase());
+  const d = el("div", { class: "letter", style }, (name.trim()[0] || "?").toUpperCase());
   d.style.background = PALETTE[h % PALETTE.length];
+  if (size) d.style.fontSize = Math.round(size * 0.6) + "px";
   return d;
 }
 
-function switchRow(title, sub, on, onchange, enabled = true) {
-  const input = el("input", { type: "checkbox", role: "switch", "aria-label": title });
+function switchRow(label, hint, on, onchange, opts = {}) {
+  const id = "sw" + Math.random().toString(36).slice(2);
+  const input = el("input", { type: "checkbox", role: "switch", "aria-labelledby": id });
   input.checked = on;
   input.addEventListener("change", () => onchange(input.checked));
-  return el("div", { class: "row" + (enabled ? "" : " disabled") },
-    el("div", { class: "grow" }, el("div", {}, title), el("div", { class: "sub" }, sub)),
+  return el("div", { class: "row" + (opts.indent ? " indent" : "") + (opts.disabled ? " disabled" : "") },
+    el("div", { class: "grow" }, el("div", { class: "label", id }, label), hint ? el("div", { class: "hint" }, hint) : null),
     el("label", { class: "switch" }, input, el("span")));
 }
 
-function renderSettings() {
+function section(title, ...rows) {
+  return el("section", {}, el("h2", {}, title), ...rows);
+}
+
+// ---- Settings ------------------------------------------------------------------
+
+function showPane(name) {
+  pane = name;
+  for (const b of document.querySelectorAll("nav button"))
+    b.setAttribute("aria-current", b.dataset.pane === name ? "page" : "false");
+  for (const p of document.querySelectorAll("main.pane")) p.classList.toggle("on", p.id === name);
+}
+
+function renderGeneral() {
   const o = S.options;
   const set = key => on => post({ cmd: "set", key, value: on });
   $("general").replaceChildren(
-    switchRow("Start with computer", "Opens hidden in the tray when you log in", S.autostart,
-      on => post({ cmd: "autostart", on })),
-    switchRow("Show notifications", "Desktop notifications from your tabs", o.notifications, set("notifications")),
-    switchRow("Show icon in tray", "Unread indicator and quick menu in the notification area", o.tray, set("tray")),
-    // Closing to a tray that isn't there would make the app unreachable.
-    switchRow("Close to tray", "Closing the window keeps webtabs running", o.close_to_tray, set("close_to_tray"), o.tray),
-    switchRow("Unread count in window title", "e.g. “webtabs (5)”", o.unread_in_title, set("unread_in_title")),
-    switchRow("GPU acceleration", "Applies after restarting webtabs", o.gpu_acceleration, set("gpu_acceleration")),
+    section("Startup",
+      switchRow("Open at login", "Starts quietly in the tray", S.autostart, on => post({ cmd: "autostart", on }))),
+    section("Notifications",
+      switchRow("Show notifications", "Notifications from your tabs", o.notifications, set("notifications")),
+      switchRow("Unread count in the window title", "e.g. “WebTabs (5)”", o.unread_in_title, set("unread_in_title")),
+      switchRow("Unread count on the taskbar icon", "A badge on the WebTabs taskbar button", o.unread_in_dock, set("unread_in_dock"))),
+    section("Tray",
+      switchRow("Show tray icon", "Unread indicator and quick menu in the notification area", o.tray, set("tray")),
+      // Closing to a tray that isn't there would make the app unreachable.
+      switchRow("Keep running when the window closes", null, o.close_to_tray, set("close_to_tray"), { indent: true, disabled: !o.tray })),
+    section("Performance",
+      switchRow("GPU acceleration", "Applies after restarting WebTabs", o.gpu_acceleration, set("gpu_acceleration"))),
   );
+}
 
-  const list = $("tabs");
-  const top = list.scrollTop;
+let menuFor = null;
+function closeMenu() { document.querySelector(".menu")?.remove(); menuFor = null; }
+
+function openMenu(t, i, anchor) {
+  closeMenu();
+  menuFor = t.id;
+  const item = (label, enabled, fn) => el("button", { disabled: !enabled, onclick: () => { closeMenu(); fn(); } }, label);
+  const menu = el("div", { class: "menu", role: "menu" },
+    item("Edit…", true, () => openForm(t.id, false)),
+    item("Move Up", i > 0, () => post({ cmd: "move", id: t.id, delta: -1 })),
+    item("Move Down", i + 1 < S.tabs.length, () => post({ cmd: "move", id: t.id, delta: 1 })),
+    el("hr"),
+    item("Remove…", true, () => post({ cmd: "remove", id: t.id })));
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const left = Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8);
+  const top = r.bottom + menu.offsetHeight + 8 > innerHeight ? r.top - menu.offsetHeight - 4 : r.bottom + 4;
+  menu.style.left = Math.max(8, left) + "px";
+  menu.style.top = top + "px";
+}
+
+function renderTabs() {
+  const list = $("tablist");
   if (!S.tabs.length) {
     list.replaceChildren(el("div", { class: "empty" }, "No tabs yet"));
     return;
   }
   list.replaceChildren(...S.tabs.map((t, i) => {
-    const btn = (svg, tip, enabled, cmd, extra = {}) =>
-      el("button", { class: "icon", title: tip, "aria-label": tip, disabled: !enabled, html: svg,
-        onclick: () => post({ cmd, id: t.id, ...extra }) });
-    const bell = t.notifications
-      ? btn(SVG.bell, "Notifications on (click to mute)", true, "tab_notify", { on: false })
-      : btn(SVG.muted, "Muted (click to unmute)", true, "tab_notify", { on: true });
-    if (t.notifications) bell.classList.add("on");
-    return el("div", { class: "row" },
-      icon(t.icon, t.name, "favicon"),
+    const bell = el("button", {
+      class: "icon-btn" + (t.notifications ? "" : " muted"),
+      html: t.notifications ? SVG.bell : SVG.muted,
+      title: t.notifications ? "Notifications on (click to mute)" : "Muted (click to unmute)",
+      "aria-label": t.notifications ? `Mute notifications for ${t.name}` : `Unmute notifications for ${t.name}`,
+      onclick: () => post({ cmd: "tab_notify", id: t.id, on: !t.notifications }),
+    });
+    const more = el("button", { class: "icon-btn", html: SVG.more, title: "Edit, move or remove", "aria-label": `More for ${t.name}` });
+    more.addEventListener("click", e => { e.stopPropagation(); menuFor === t.id ? closeMenu() : openMenu(t, i, more); });
+    const ic = el("span", { class: "ticon" }, icon(t.icon, t.name), t.label ? el("span", { class: "tag" }, t.label) : null);
+    const grip = el("span", { class: "grip", html: SVG.grip, title: "Drag to reorder", "aria-hidden": "true" });
+    const row = el("div", { class: "tabrow", role: "listitem", "data-i": i },
+      grip, ic,
       el("div", { class: "grow" },
-        el("div", { class: "ellipsis" }, t.name),
-        el("div", { class: "sub ellipsis", title: t.url }, t.url)),
-      bell,
-      btn(SVG.up, "Move up (left in the tab bar)", i > 0, "move", { delta: -1 }),
-      btn(SVG.down, "Move down (right in the tab bar)", i + 1 < S.tabs.length, "move", { delta: 1 }),
-      el("button", { class: "icon", title: "Edit", "aria-label": "Edit", html: SVG.edit,
-        onclick: () => openForm(t.id, false) }),
-      btn(SVG.trash, "Remove", true, "remove"));
+        el("div", { style: "display:flex;align-items:center;gap:8px" },
+          el("span", { class: "label ellipsis" }, t.name),
+          t.isolated ? el("span", { class: "chip" }, "Own login") : null),
+        el("div", { class: "url ellipsis", title: t.url }, t.url)),
+      bell, more);
+    // Drag by the handle to reorder.
+    grip.addEventListener("mousedown", () => { row.draggable = true; });
+    row.addEventListener("dragstart", e => { e.dataTransfer.setData("text/webtabs-tab", String(i)); e.dataTransfer.effectAllowed = "move"; row.classList.add("dragging"); });
+    row.addEventListener("dragend", () => { row.draggable = false; row.classList.remove("dragging"); clearDrop(); });
+    row.addEventListener("dragover", e => {
+      if (!e.dataTransfer.types.includes("text/webtabs-tab")) return;
+      e.preventDefault();
+      clearDrop();
+      const r = row.getBoundingClientRect();
+      row.classList.add(e.clientY < r.top + r.height / 2 ? "drop-before" : "drop-after");
+    });
+    row.addEventListener("drop", e => {
+      e.preventDefault();
+      const from = Number(e.dataTransfer.getData("text/webtabs-tab"));
+      const r = row.getBoundingClientRect();
+      let to = i + (e.clientY < r.top + r.height / 2 ? 0 : 1);
+      if (from < to) to -= 1;
+      clearDrop();
+      if (to !== from) post({ cmd: "reorder", id: S.tabs[from].id, to });
+    });
+    return row;
   }));
-  list.scrollTop = top;
 }
 
+function clearDrop() {
+  for (const r of document.querySelectorAll(".drop-before, .drop-after")) r.classList.remove("drop-before", "drop-after");
+}
+
+// The tab bar's colours, as Rust paints them (see appearance.rs).
+function barColors(tint) {
+  const d = dark();
+  const preset = S.tints.find(x => x.name === tint);
+  let bar, light;
+  if (!tint) { bar = d ? S.bar_dark : S.bar_light; light = d; }
+  else if (preset) { bar = d ? preset.dark : preset.light; light = d; }
+  else {
+    bar = tint;
+    const c = k => parseInt(tint.slice(k, k + 2), 16) / 255;
+    light = 0.2126 * c(1) + 0.7152 * c(3) + 0.0722 * c(5) < 0.5;
+  }
+  return { bar, label: light ? "#ffffff" : "#000000", glyph: light ? "#c8c8c8" : "#5f5f5f", accent: light ? "#ff6a2b" : "#f0520f" };
+}
+
+function renderPreview() {
+  const m = S.metrics[S.options.icon_size];
+  const c = barColors(S.options.tint);
+  const bar = $("pbar");
+  bar.style.background = c.bar;
+  bar.style.height = m.height + "px";
+  const tabs = S.tabs.slice(0, 4);
+  const sample = tabs.length ? tabs : [{ name: "WebTabs", icon: S.app_icon }];
+  bar.replaceChildren(...sample.map((t, i) => {
+    const tile = el("div", { class: "tile", style: `width:${m.tile}px;height:${m.height}px` });
+    if (i === 0) {
+      tile.append(el("div", { class: "hl", style: `top:${m.tile_y}px;width:${m.tile}px;height:${m.tile}px;border-radius:${m.radius}px;background:${c.label};opacity:.08` }));
+      tile.append(el("div", { class: "marker", style: `left:${m.tile / 2 - 7}px;top:${m.tile_y + m.tile + 1}px;background:${c.accent}` }));
+    }
+    const ic = icon(t.icon, t.name, m.icon);
+    ic.style.left = (m.tile - m.icon) / 2 + "px";
+    ic.style.top = m.tile_y + (m.tile - m.icon) / 2 + "px";
+    ic.style.position = "absolute";
+    tile.append(ic);
+    if (i === 0) {
+      const b = el("div", { class: "badge" }, "3");
+      b.style.borderColor = c.bar;
+      b.style.right = "-6px";
+      b.style.top = m.tile_y - 3 + "px";
+      tile.append(b);
+    }
+    return tile;
+  }), el("div", { class: "tool", style: `margin-top:${m.tile_y + (m.tile - 28) / 2}px;color:${c.glyph}`,
+    html: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>' }));
+}
+
+function renderAppearance() {
+  const o = S.options;
+  const size = $("size");
+  size.min = S.icon_min; size.max = S.icon_max;
+  if (!dragging) size.value = o.icon_size;
+  $("sizeLabel").textContent = o.icon_size + " pt";
+  const custom = !!(o.tint && o.tint.startsWith("#"));
+  const d = dark();
+  const swatch = (tint, label, bg, extra = "") => el("button", {
+    class: "swatch " + extra, title: label, "aria-label": label, "aria-pressed": String(tint === o.tint || (tint === "custom" && custom)),
+    style: bg ? `background:${bg}` : "",
+    onclick: () => pickTint(tint),
+  });
+  const customSwatch = swatch("custom", "Custom", null, "custom" + (custom ? " set" : ""));
+  if (custom) customSwatch.style.setProperty("--custom", o.tint);
+  $("swatches").replaceChildren(
+    swatch(null, "Default", d ? S.bar_dark : S.bar_light),
+    ...S.tints.map(t => swatch(t.name, t.label, d ? t.dark : t.light)),
+    customSwatch);
+  $("tintLabel").textContent = !o.tint ? "Default" : custom ? "Custom " + o.tint : S.tints.find(t => t.name === o.tint)?.label ?? o.tint;
+  renderPreview();
+}
+
+function pickTint(tint) {
+  if (tint === "custom") {
+    const p = $("picker");
+    p.value = S.options.tint && S.options.tint.startsWith("#") ? S.options.tint : "#f4e3d0";
+    p.click();
+    return;
+  }
+  setAppearance({ tint });
+}
+
+function setAppearance(change) {
+  Object.assign(S.options, change);
+  renderAppearance();
+  post({ cmd: "appearance", ...change });
+}
+
+function renderAbout() {
+  $("version").textContent = "v" + S.version;
+  if (S.app_icon) $("appIcon").src = S.app_icon;
+}
+
+function renderSettings() {
+  renderGeneral();
+  renderTabs();
+  renderAppearance();
+  renderAbout();
+}
+
+// ---- Add / edit form ------------------------------------------------------------------
+
 function show(view) {
-  for (const v of document.querySelectorAll(".view")) v.classList.toggle("on", v.id === view);
-  post({ cmd: "view", title: view === "settings" ? "webtabs settings" : form.id === null ? "Add tab" : "Edit tab" });
+  $("settings").hidden = view !== "settings";
+  $("form").classList.toggle("on", view === "form");
+  post({ cmd: "view", title: view === "settings" ? "WebTabs Settings" : form.id === null ? "Add tab" : "Edit tab" });
 }
 
 function openForm(id, only) {
-  form = { id, only };
+  closeMenu();
   const t = id === null ? null : S.tabs.find(x => x.id === id);
   if (id !== null && !t) return;
-  $("presets").hidden = id !== null;
+  form = { id, only };
+  const adding = id === null;
+  $("formTitle").textContent = adding ? "Add a web app" : "Edit tab";
+  $("urlLabel").textContent = adding ? "Or any web address" : "Web address";
+  $("save").textContent = adding ? "Add Tab" : "Save";
+  $("presets").hidden = !adding;
   $("presets").replaceChildren(...S.presets.map((p, i) => el("button", {
-    class: "preset", title: p.url, "data-i": i,
+    class: "preset", title: p.url, "data-i": i, "aria-pressed": "false",
     onclick: () => {
       $("url").value = p.url; $("name").value = p.name;
-      $("url").classList.remove("error"); hint(); $("name").focus();
+      urlChanged(); $("name").focus();
     } }, icon(p.icon, p.name), el("span", {}, p.name))));
   $("url").value = t ? t.url : "";
   $("name").value = t ? t.name : "";
-  $("label").value = t && t.label ? t.label : "";
-  $("isolated").checked = !!(t && t.isolated);
-  $("mute").checked = !!(t && !t.notifications);
-  $("url").classList.remove("error");
-
-  const ua = $("ua");
-  ua.replaceChildren(el("option", { value: "default" }, "Default (Edge)"),
-    ...S.ua_presets.map(([n]) => el("option", { value: n }, n)),
-    el("option", { value: "custom" }, "Custom…"));
+  $("tag").value = t && t.label ? t.label : "";
+  $("own").checked = !!(t && t.isolated);
+  $("notify").checked = !t || t.notifications;
   const cur = t ? t.user_agent : null;
   const preset = cur && S.ua_presets.find(([, v]) => v === cur);
-  ua.value = !cur ? "default" : preset ? preset[0] : "custom";
-  $("uaCustom").value = ua.value === "custom" ? cur : "";
-  $("uaCustom").hidden = ua.value !== "custom";
-  $("advanced").open = ua.value !== "default";
-  $("save").textContent = id === null ? "Add tab" : "Save";
+  uaChoice = !cur ? "default" : preset ? preset[0] : "custom";
+  $("uaCustom").value = uaChoice === "custom" ? cur : "";
+  renderUa();
+  setError(false);
   $("isoHint").hidden = true;
+  const nonDefault = $("own").checked || !$("notify").checked || $("tag").value || uaChoice !== "default";
+  setOptions(!adding || !!nonDefault);
   show("form");
+  markPreset();
   hint();
-  (id === null ? $("url") : $("name")).focus();
+  (adding ? $("url") : $("name")).focus();
+}
+
+function renderUa() {
+  const options = [["default", "Edge"], ...S.ua_presets.map(([n]) => [n, n]), ["custom", "Custom…"]];
+  $("ua").replaceChildren(...options.map(([value, label]) => el("button", {
+    role: "radio", "aria-checked": String(value === uaChoice),
+    onclick: () => { uaChoice = value; renderUa(); if (value === "custom") $("uaCustom").focus(); summary(); },
+  }, label)));
+  $("uaCustom").hidden = uaChoice !== "custom";
+  summary();
+}
+
+function setOptions(open) {
+  $("options").hidden = !open;
+  $("optToggle").setAttribute("aria-expanded", String(open));
+  $("summary").hidden = open;
+  summary();
+}
+
+function summary() {
+  const parts = [$("own").checked ? "Own login" : "Shared login", $("notify").checked ? "Notifications on" : "Muted"];
+  const tag = $("tag").value.trim();
+  if (tag) parts.push("Tag " + tag);
+  if (uaChoice === "custom") parts.push("Custom identity");
+  else if (uaChoice !== "default") parts.push(uaChoice);
+  $("summary").textContent = parts.join(" · ");
+}
+
+function markPreset() {
+  const url = $("url").value.trim().replace(/\/+$/, "");
+  for (const b of document.querySelectorAll(".preset")) {
+    const p = S.presets[b.dataset.i];
+    b.setAttribute("aria-pressed", String(p.url.replace(/\/+$/, "") === url));
+  }
+}
+
+function setError(on) {
+  $("url").classList.toggle("error", on);
+  $("urlError").hidden = !on;
+}
+
+function urlChanged() {
+  setError(false);
+  markPreset();
+  hint();
 }
 
 function closeForm() {
@@ -290,25 +652,28 @@ function closeForm() {
 }
 
 function hint() {
-  if (form) post({ cmd: "hint", id: form.id, url: $("url").value, isolated: $("isolated").checked });
+  if (form) post({ cmd: "hint", id: form.id, url: $("url").value, isolated: $("own").checked });
 }
 
 function save() {
   post({
-    cmd: "save_tab", id: form.id, url: $("url").value, name: $("name").value, label: $("label").value,
-    isolated: $("isolated").checked, mute: $("mute").checked,
-    ua: $("ua").value, ua_custom: $("uaCustom").value,
+    cmd: "save_tab", id: form.id, url: $("url").value, name: $("name").value, label: $("tag").value,
+    isolated: $("own").checked, mute: !$("notify").checked,
+    ua: uaChoice, ua_custom: $("uaCustom").value,
   });
 }
+
+// ---- Messages from Rust ------------------------------------------------------------
 
 window.chrome.webview.addEventListener("message", e => {
   const m = e.data;
   switch (m.cmd) {
     case "state":
+      if (!m.app_icon && S) m.app_icon = S.app_icon;  // sent once
       S = m;
       renderSettings();
       break;
-    case "form":       // from Rust: the "+" button, a tab's Edit…, or Ctrl+T
+    case "form":       // the "+" button, a tab's Edit…, Ctrl+T
       openForm(m.id, m.only);
       break;
     case "settings":
@@ -322,11 +687,11 @@ window.chrome.webview.addEventListener("message", e => {
       break;
     }
     case "hint":
-      $("isoHint").textContent = m.text || "";
+      $("isoText").textContent = m.text || "";
       $("isoHint").hidden = !m.text;
       break;
     case "tab_invalid":
-      $("url").classList.add("error");
+      setError(true);
       $("url").focus();
       break;
     case "tab_saved":
@@ -335,28 +700,41 @@ window.chrome.webview.addEventListener("message", e => {
   }
 });
 
+for (const b of document.querySelectorAll("nav button")) b.addEventListener("click", () => showPane(b.dataset.pane));
 $("add").onclick = () => openForm(null, false);
-$("toml").onclick = () => post({ cmd: "open_toml" });
-$("close").onclick = () => post({ cmd: "close" });
+$("toml").onclick = $("aboutToml").onclick = () => post({ cmd: "open_toml" });
+$("site").onclick = () => post({ cmd: "open_site" });
+$("vaan").onclick = () => post({ cmd: "open_vaan" });
+$("size").addEventListener("pointerdown", () => { dragging = true; });
+$("size").addEventListener("pointerup", () => { dragging = false; });
+$("size").addEventListener("input", () => setAppearance({ icon_size: Number($("size").value) }));
+$("picker").addEventListener("input", () => setAppearance({ tint: $("picker").value.toLowerCase() }));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => S && renderAppearance());
 $("cancel").onclick = closeForm;
 $("save").onclick = save;
-$("url").addEventListener("input", () => { $("url").classList.remove("error"); hint(); });
-$("isolated").addEventListener("change", hint);
-$("ua").addEventListener("change", () => {
-  $("uaCustom").hidden = $("ua").value !== "custom";
-  if ($("ua").value === "custom") $("uaCustom").focus();
-});
+$("url").addEventListener("input", urlChanged);
+$("own").addEventListener("change", () => { hint(); summary(); });
+$("notify").addEventListener("change", summary);
+$("tag").addEventListener("input", summary);
+$("optToggle").onclick = () => setOptions($("options").hidden);
+document.addEventListener("click", e => { if (!e.target.closest(".menu")) closeMenu(); });
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { e.preventDefault(); form ? closeForm() : post({ cmd: "close" }); }
-  else if (e.key === "Enter" && form && e.target.tagName === "INPUT" && e.target.type === "text") {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if (document.querySelector(".menu")) closeMenu();
+    else if (form) closeForm();
+    else post({ cmd: "close" });
+  } else if (e.key === "Enter" && form && e.target.tagName === "INPUT" && e.target.type === "text") {
     e.preventDefault(); save();
   }
 });
-// Nothing here is a document to drop files on or a link to follow.
-for (const t of ["dragover", "drop"]) document.addEventListener(t, e => e.preventDefault());
+// Nothing here is a document to drop files on, or a page to inspect.
+document.addEventListener("dragover", e => { if (!e.dataTransfer.types.includes("text/webtabs-tab")) e.preventDefault(); });
+document.addEventListener("drop", e => { if (!e.dataTransfer.types.includes("text/webtabs-tab")) e.preventDefault(); });
 document.addEventListener("contextmenu", e => {
   if (!(e.target.tagName === "INPUT" && e.target.type === "text")) e.preventDefault();
 });
+showPane("general");
 post({ cmd: "ready" });
 </script>
 </body>
