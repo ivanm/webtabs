@@ -7,7 +7,7 @@ pkgrel=1
 pkgdesc="Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview"
 arch=('x86_64' 'aarch64')
 url="https://github.com/ivanm/webtabs"
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'libayatana-appindicator' 'glib2' 'cairo'
          'gdk-pixbuf2' 'libgcc' 'glibc')
 makedepends=('cargo')

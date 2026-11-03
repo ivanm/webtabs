@@ -3,7 +3,7 @@ name = "webtabs"
 version = "0.2.4"
 edition = "2024"
 description = "Tiny, no-clutter web app tabs (WhatsApp, Gmail, Slack...) on the system webview"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "webtabs_core"

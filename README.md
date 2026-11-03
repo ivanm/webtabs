@@ -12,7 +12,7 @@ notifications. No Electron.
 
 ![Linux](https://img.shields.io/badge/Linux-GTK%20%2B%20WebKit-333?logo=linux&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-14%2B-333?logo=apple&logoColor=white) ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-333?logo=windows&logoColor=white) ![Rust](https://img.shields.io/badge/core-Rust-333?logo=rust&logoColor=white)
 
-[Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Development](docs/DEVELOPMENT.md)
+[Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Development](docs/DEVELOPMENT.md) · [License](#license)
 
 <img src="docs/screenshot-macos.png" alt="WebTabs on macOS: WhatsApp, Slack, Gmail, Calendar and Telegram as tabs with unread badges" width="760">
 
@@ -193,3 +193,11 @@ Middle-click a tab to reload it. ¹ Linux and macOS.
 
 A Rust core with a native front end per platform; see
 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
+
+## License
+
+Copyright © 2026 Ivan Mayoral and WebTabs contributors.
+
+WebTabs is free software under the [GNU General Public License v3.0 or later](LICENSE).
+You may use, share and change it. If you distribute a modified version, you must
+release its source under the same license.
