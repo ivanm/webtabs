@@ -28,22 +28,14 @@ notifications. No Electron.
 
 ## Download
 
-Get the latest version from the [Releases page](https://github.com/ivanm/webtabs/releases/latest).
+Get the files from the [latest release](https://github.com/ivanm/webtabs/releases/latest).
 
-| Platform | File | Install |
-|---|---|---|
-| **macOS 14+** (Apple Silicon, Intel) | `WebTabs-macOS.zip` | Unzip, move `WebTabs.app` to Applications |
-| **Windows 10 22H2+ / 11** | `WebTabs-<version>-windows-x64.msi` | Double-click; installs for you only, no admin |
-| | `webtabs-<version>-windows-x64.zip` | Portable: unzip and run `webtabs.exe` |
-| **Ubuntu 24.04+ / Debian 13+** | `webtabs_<version>_amd64.deb` | `sudo apt install ./webtabs_*_amd64.deb` |
-| **Arch Linux** | `webtabs-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U webtabs-*.pkg.tar.zst` |
-| **Any Linux** (x86_64) | `webtabs-<version>-linux-x86_64.tar.gz` | `tar xzf webtabs-*.tar.gz && webtabs-*/install.sh` |
+### macOS (14+)
 
-Each release lists SHA-256 checksums (`SHA256SUMS-*`). With the GitHub CLI:
-
-```sh
-gh release download --repo ivanm/webtabs --pattern 'WebTabs-macOS.zip'
-```
+1. Download **`WebTabs-macOS.zip`**, unzip it, and move **WebTabs** to **Applications**.
+2. Open WebTabs. macOS blocks it the first time because it isn't notarized yet. Click **Done**.
+3. Go to **System Settings › Privacy & Security** and click **Open Anyway** next to WebTabs.
+4. When asked for your keychain password, choose **Always Allow**.
 
 > [!IMPORTANT]
 > **On macOS, choose *Always Allow* when WebTabs asks for your login keychain
@@ -55,19 +47,21 @@ gh release download --repo ivanm/webtabs --pattern 'WebTabs-macOS.zip'
 >
 > <img src="docs/keychain-prompt-macos.png" width="400" alt="macOS asking for the login keychain password so WebTabs can use the WebTabs WebCrypto Master Key, with Always Allow, Deny and Allow buttons">
 
-<details>
-<summary><b>First launch: macOS and Windows warnings</b></summary>
+### Windows (10 22H2+ / 11)
 
-The apps aren't notarized (macOS) or code-signed (Windows) yet.
+1. Download **`WebTabs-<version>-windows-x64.msi`**. If the browser warns, choose **Keep**.
+2. Open it. If *Windows protected your PC* appears, click **More info › Run anyway**. It's not code-signed yet.
+3. It installs for your account only, with no admin prompt. Open **WebTabs** from Start.
 
-- **macOS** blocks the first launch of a downloaded copy. Open it anyway from
-  System Settings › Privacy & Security › *Open Anyway*. Downloading with `gh`
-  (above) skips this check.
-- **Windows** SmartScreen warns the first time: *More info › Run anyway*. The
-  installer needs the Microsoft Edge WebView2 Runtime, which every Windows 11 PC
-  already has; on Windows 10 it links you to it if missing.
+Updates: open a newer `.msi`. Portable instead: extract **`webtabs-<version>-windows-x64.zip`** and run `webtabs.exe`.
 
-</details>
+### Linux (x86_64)
+
+- **Ubuntu 24.04+ / Debian 13+:** download **`webtabs_<version>_amd64.deb`**, then `sudo apt install ./webtabs_*_amd64.deb`
+- **Arch:** download **`webtabs-<version>-1-x86_64.pkg.tar.zst`**, then `sudo pacman -U webtabs-*.pkg.tar.zst`
+- **Any other distro:** download **`webtabs-<version>-linux-x86_64.tar.gz`**, then `tar xzf webtabs-*.tar.gz && webtabs-*/install.sh`
+
+Then open **WebTabs** from your app menu.
 
 <details>
 <summary><b>Linux: requirements, removal and building from source</b></summary>
