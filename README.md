@@ -6,7 +6,7 @@
 
 **Pinned web apps in a native window.**
 
-macOS · Windows · Linux — built in Rust.<br>
+macOS · Windows · Linux. Built in Rust.<br>
 WhatsApp, Slack, Gmail and your own tools as tabs, with unread counts and
 notifications. No Electron.
 
@@ -20,7 +20,7 @@ notifications. No Electron.
 
 ## Features
 
-- **Native and small:** the system web engine (WebKit or WebView2), not a bundled Chromium.
+- **Native wrappers:** the system web engine (WebKit or WebView2), not a bundled Chromium.
 - **Unread counts and notifications:** on each tab, the title, tray and Dock; mute any tab.
 - **Two accounts, one service:** *isolated login* gives a tab its own cookies.
 - **Safe defaults:** other sites open in your browser; permissions stay per site.
