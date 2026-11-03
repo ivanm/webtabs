@@ -128,8 +128,8 @@ close_to_tray = true
 unread_in_title = true
 unread_in_dock = true            # macOS Dock / Linux launcher icon
 # gpu_acceleration = false       # Linux/Windows: draw pages on the CPU
-# icon_size = 28                 # tab icons, 16–32 pt (default 22; macOS for now)
-# tint = "sage"                  # title bar: graphite, sand, sage, sky, lavender, rose or "#rrggbb"
+# icon_size = 28                 # tab icons, 16–32 pt (default 22)
+# tint = "sage"                  # tab bar: graphite, sand, sage, sky, lavender, rose or "#rrggbb"
 # user_agent = "..."             # override for every tab
 
 [[tab]]

@@ -44,10 +44,6 @@ impl BarMetrics {
         }
     }
 
-    pub fn tall(&self) -> bool {
-        self.height > 40
-    }
-
     /// The active marker: 14×3, centred, 1 px under the tile.
     pub fn marker(&self) -> (i32, i32, i32, i32) {
         (
@@ -150,7 +146,7 @@ mod tests {
         let m = BarMetrics::new(24);
         assert_eq!((m.height, m.tile, m.tile_y), (40, 34, 2));
         let m = BarMetrics::new(30);
-        assert!(m.tall());
+        assert_eq!(m.height, 52);
         assert_eq!((m.height, m.tile, m.tile_y, m.radius), (52, 40, 5, 10));
         let m = BarMetrics::new(16);
         assert_eq!((m.tile, m.tile_y, m.radius), (26, 6, 7));
