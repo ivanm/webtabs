@@ -4,15 +4,15 @@
 
 # WebTabs
 
-**Your web apps in one tiny native window.**
+**Pinned web apps in a native window.**
 
-WhatsApp, Slack, Gmail, Calendar, Telegram or your own dashboards, side by side as
-tabs, with unread counts, real notifications and a tray icon.
-No Electron, no account, no store.
+macOS · Windows · Linux — built in Rust.<br>
+WhatsApp, Slack, Gmail and your own tools as tabs, with unread counts and
+notifications. No Electron.
 
 ![Linux](https://img.shields.io/badge/Linux-GTK%20%2B%20WebKit-333?logo=linux&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-14%2B-333?logo=apple&logoColor=white) ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-333?logo=windows&logoColor=white) ![Rust](https://img.shields.io/badge/core-Rust-333?logo=rust&logoColor=white)
 
-[Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Shortcuts](#shortcuts) · [Development](docs/DEVELOPMENT.md)
+[Download](#download) · [Features](#features) · [Using WebTabs](#using-webtabs) · [Development](docs/DEVELOPMENT.md)
 
 <img src="docs/screenshot-macos.png" alt="WebTabs on macOS: WhatsApp, Slack, Gmail, Calendar and Telegram as tabs with unread badges" width="760">
 
@@ -20,21 +20,11 @@ No Electron, no account, no store.
 
 ## Features
 
-- **Tiny and native.** A few megabytes on the web engine your system already has
-  (WebKit on Linux and macOS, WebView2 on Windows), not a bundled Chromium.
-- **Unread at a glance.** Each tab's icon shows its count; the total shows in the
-  window title, the tray icon and, on macOS and supporting Linux docks, the app icon.
-- **Real notifications.** Messages become desktop notifications; clicking one
-  opens the right tab and jumps to that chat or email. Mute any tab you like.
-- **Two accounts, one service.** *Isolated login* gives a tab its own cookies, so
-  you can run two Slack or Gmail accounts side by side.
-- **Lives in the tray.** Close the window and it keeps running; start it with
-  your computer, hidden, so messages are there when you need them.
-- **Safe by default.** Links to other sites open in your browser, sign-ins stay
-  in the app, and pages only get notifications, camera and mic for their own
-  site. Pages can't read your clipboard or open apps on their own.
-- **One plain config file.** Everything lives in `tabs.toml`. Edit it by hand and
-  the app picks up the changes live, without logging you out.
+- **Native and small:** the system web engine (WebKit or WebView2), not a bundled Chromium.
+- **Unread counts and notifications:** on each tab, the title, tray and Dock; mute any tab.
+- **Two accounts, one service:** *isolated login* gives a tab its own cookies.
+- **Safe defaults:** other sites open in your browser; permissions stay per site.
+- **Tray and one config file:** runs in the background; `tabs.toml` applies live.
 
 ## Download
 
@@ -98,6 +88,12 @@ Uninstalling never deletes your tabs or logins.
 
 ## Using WebTabs
 
+Add a tab with **+**, right-click a tab to reload, edit, move or remove it, and
+open **Settings** with the gear.
+
+<details>
+<summary><b>Tabs and settings</b></summary>
+
 **Add a tab** with **+**: pick WhatsApp, Slack, Telegram or Gmail in one click, or
 paste any URL. Optionally give it a short **icon tag** (like `W2`) to tell similar
 tabs apart, mute its notifications, or turn on **isolated login** for a second
@@ -117,7 +113,10 @@ them inside Slack.
 | Unread count on Dock / launcher icon | macOS Dock; Linux docks that support badges (KDE, Dash to Dock, Plank) |
 | GPU acceleration | Linux and Windows; turn off only if pages render wrong. Applies after a restart |
 
-Below the switches is your tab list: reorder, mute, edit or remove tabs.
+Settings also lists your tabs to reorder, mute, edit or remove. On macOS,
+*Appearance* sets the tab icon size and the title bar color.
+
+</details>
 
 <details>
 <summary><b>The config file: <code>tabs.toml</code></b></summary>
@@ -158,7 +157,8 @@ notification) until you fix it. Removing an isolated tab deletes its login data.
 
 </details>
 
-## Shortcuts
+<details>
+<summary><b>Keyboard shortcuts</b></summary>
 
 | Linux · Windows | macOS | Action |
 |---|---|---|
@@ -175,7 +175,10 @@ notification) until you fix it. Removing an isolated tab deletes its login data.
 
 Middle-click a tab to reload it. ¹ Linux and macOS.
 
-## Good to know
+</details>
+
+<details>
+<summary><b>Good to know</b></summary>
 
 - **Unread counts** come from page titles like `(3) WhatsApp` or `Inbox (12)`.
 - **Fullscreen video** (YouTube, Meet) fills the screen on Linux and macOS; Escape
@@ -184,9 +187,9 @@ Middle-click a tab to reload it. ¹ Linux and macOS.
 - **Notifications on macOS** show only once WebTabs is allowed them in System
   Settings › Notifications. Service-worker push notifications aren't supported.
 
+</details>
+
 ## Development
 
-WebTabs is one Rust core (config, unread parsing, link rules, icons, presets)
-with a native front end per platform: GTK + WebKitGTK on Linux, Swift + AppKit +
-WKWebView on macOS, Win32 + WebView2 on Windows. Building, testing, packaging and
-releasing are in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
+A Rust core with a native front end per platform; see
+**[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
